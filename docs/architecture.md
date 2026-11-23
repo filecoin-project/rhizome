@@ -88,13 +88,13 @@ FWSS `352b614` supports signed dataset creation with selected terms. The inspect
 
 MSP aims to maintain three PDP copies at distinct eligible SPs. An **admission** is one accepted signed AddPieces request, which can also authorize dataset creation. At acceptance, the trusted Upload SP may hold the only copy, still awaiting commitment.
 
-MSP selects the Upload SP at tus preflight. For a new admission, validate caller authority, run exact contract preflight, and [confirm the parked source](design/execution-and-integrations.md#mandatory-confirmation-retrieval-head) and its remaining retention. The [funding policy](design/funding-and-lifecycle.md#agreed-admission-policies) also rejects known shortfalls in backend funding or three eligible destinations. Use evidence already available for these shortfall checks; unknown backend readiness by itself permits admission. After validating authority and correlating the request, an accepted replay recovers the original operation before new-admission checks.
+MSP selects the Upload SP at tus preflight. For a new admission, validate caller authority, run exact contract preflight, and [confirm the signed PieceCID at that SP](design/execution-and-integrations.md#mandatory-confirmation-retrieval-head) and its remaining retention. MSP does not verify which upload supplied the piece. The [funding policy](design/funding-and-lifecycle.md#agreed-admission-policies) also rejects known shortfalls in backend funding or three eligible destinations. Use evidence already available for these shortfall checks; unknown backend readiness by itself permits admission. After validating authority and correlating the request, an accepted replay recovers the original operation before new-admission checks.
 
 After acceptance, start additional transfers eagerly and proceed with client-facing and Upload-SP AddPieces independently. Either commitment can finish first, while replication continues. Batch the backend AddPieces work.
 
 ### Staging retention
 
-Curio must provide a [parking refresh endpoint](design/execution-and-integrations.md#parking-refresh-and-retention) to protect exact staged references from GC while MSP relies on them. Establish enough remaining retention before acceptance, then refresh source and destination staging as needed during fulfillment and recovery.
+Curio must provide [retention protection](design/execution-and-integrations.md#parking-refresh-and-retention) by PieceCID for a direct-upload source and by exact staging reference for a pull. Establish enough remaining retention before acceptance, then refresh source and destination staging as needed during fulfillment and recovery.
 
 Confirm parking with a HEAD to the selected Upload SP's piece URL. Require HTTP 200 and a Content-Length equal to the expected raw size. The check transfers no body, verifies neither content nor future availability, and creates no reference or lease.
 
@@ -128,7 +128,7 @@ Pool pieces from many client datasets into fewer backend SP datasets. A client's
 
 ### Batch concentration and destination rotation
 
-Concentrate compatible additions in one open backend dataset per SP. Rotate destinations according to eligibility and urgency, and keep issued transfers with their assigned destination.
+Concentrate compatible additions in one open backend dataset per SP. Provision backend datasets separately and wait for creation finality before using them for AddPieces. This does not change the successful-inclusion boundary for AddPieces itself. Rotate destinations according to eligibility and urgency, and keep issued transfers with their assigned destination.
 
 ### Urgency-sensitive batching
 
@@ -270,7 +270,7 @@ When available without significant overhead, anchor a grace condition to the con
 2. One short transaction records provisional admission, enqueues the client-facing transaction, and creates the durable Storage-management handoff.
 3. Storage management applies the stable admission identity/revision idempotently and records placement work through its interface; transfers/commitment proceed alongside client-facing work.
 4. Confirmation promotes the same interest; definitive failure withdraws it. Storage reconciles shared interests and unresolved operations, and exposes specific placement outcomes without Client service mutating placement records.
-5. Payments continues funding/settlement independently; operator-approved termination follows run-off while issued storage work is reconciled.
+5. Payments continues funding and settlement independently. When an operator-approved termination takes effect, run-off begins while issued storage work is reconciled.
 
 ### Durable handoff and concurrency
 

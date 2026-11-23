@@ -48,7 +48,7 @@ For a particular interest, accounting must distinguish:
 
 - **Established protection:** committed placements suitable for the interest, with usability assessed from current evidence.
 - **Available sources:** observed usable data locations, including staging and outgoing placements, that can supply replication or repair.
-- **Planned protection:** suitable outstanding placement work, including transfers and unresolved commitments, used to calculate the remaining deficit.
+- **Planned protection:** suitable outstanding placement work, including transfers and unresolved commitments, used to calculate the remaining deficit. When a stalled commitment stops counting is [unresolved](README.md#4-complete-storage-maintenance-and-retrieval).
 - **Outgoing protection:** placements with authorized removals, excluded from established protection.
 
 Count distinct suitable SPs toward each interest's three-SP target. Shared placements can satisfy several interests simultaneously.
@@ -95,7 +95,7 @@ Retain coordination rows while interests, placements, pending updates, unresolve
 
 ### Multi-piece batches and lock order
 
-Batch discovery reads candidate ready placements. A bounded freezing transaction takes distinct piece locks in canonical order, rechecks need/readiness and absence of a prior frozen entry, then validates that the destination dataset's accepting state and on-chain ID match its current creation result. Persist the exact ordered entries atomically, preserving every signed entry and interest.
+Batch discovery reads candidate ready placements. A bounded freezing transaction takes distinct piece locks in canonical order, rechecks need/readiness and absence of a prior frozen entry, then validates that the destination dataset is open for additions and its on-chain ID matches its finalized creation result. Persist the exact ordered entries atomically, preserving every signed entry and interest.
 
 For chain-applicability checks, first acquire a shared lock (`FOR SHARE`) on the chain's `chain.reconciliation_basis` row. Its branch token identifies the observed canonical branch. Then acquire storage locks in order: piece rows sorted by `(managed_scope, piece_cid)` bytes; destination slots/datasets by ID; FWSS nonce claims by `(chain_key, fwss, payer, nonce)`; then placement, batch and operation rows by ID.
 
@@ -127,7 +127,7 @@ SQL schemas identify module ownership. Local IDs are UUIDs and local revisions a
 
 Owner APIs validate authorization bindings, complete nonce claims, contiguous entry indexes and complete handoffs before commit.
 
-Client service owns preflight upload records. Retain the stable MSP upload ID, authenticated client and client-scoped idempotency key, immutable constraints, chosen SP and endpoint binding, and expiry/recovery metadata. This record authorizes staging only; it is not an admission or nonce claim.
+Client service owns preflight upload records. Retain the stable MSP upload ID, authenticated client and client-scoped idempotency key, immutable constraints, chosen SP and endpoint binding, and creation deadline. Retain enough to replay the original preflight without extending that deadline. This record authorizes staging and identifies the provider; it is not an admission, a nonce claim, or evidence of uploaded bytes.
 
 ```sql
 CREATE DOMAIN uint256 AS numeric(78, 0)
@@ -200,7 +200,7 @@ CREATE TABLE client.entries (
 
 `bound_request` preserves the complete typed envelope: EIP-712 domain, authorization digests, signed fields and metadata representation, dataset route or creation variant/terms, and call semantics. Preserve signed array order and use consistent scalar/binary encodings. Equivalent transport encodings and separately valid equivalent signatures compare equal on replay; execution retains the first accepted authorization and call.
 
-Entries retain their PieceCID and selected SP. `admission_evidence` associates each ordered entry with its MSP upload ID and exact staging reference, and retains successful source evidence, trusted endpoint/version, observation time, and guaranteed retention deadline. Share HEAD evidence for the same `(source_sp, piece_cid)` without conflating distinct staging references. Decode raw size from the signed v2 CID. Transport upload IDs do not change the signed authorization or the identity of an accepted admission.
+Entries retain their PieceCID and selected SP. `admission_evidence` associates each ordered entry with its MSP upload ID for routing and retains successful HEAD and retention evidence by `(source_sp, piece_cid)`, including trusted endpoint/version, observation time, and guaranteed deadline. Share evidence for the same source and PieceCID. Decode raw size from the signed v2 CID. Transport upload IDs do not prove provenance or change the signed authorization or accepted admission identity.
 
 `source_revision` orders the interest updates Client service publishes for an entry; `source_state` holds its published interest state. `service_requested` records the client's continuing service intent. Acceptance sets it true; an explicit domain withdrawal clears it. A chain-derived failure can withdraw published interest while preserving that intent for reorg recovery. Request cancellation preserves accepted intent.
 
@@ -270,12 +270,12 @@ Storage management records placement work, transfers, fixed commitment batches a
 
 | Storage-management record | Required fields and constraints |
 | --- | --- |
-| `dataset_slots` and `datasets` | Slot PK `(managed_scope, sp_id)` selects the open backend dataset. Its accepting state and on-chain dataset ID follow the validated creation result. Invalidation closes it to new batches until the current result is correlated. Claim creation before signing; combined creation/addition claims both keys. |
+| `dataset_slots` and `datasets` | Slot PK `(managed_scope, sp_id)` selects the open backend dataset. Persist standalone creation intent and its nonce claim before signing. A dataset accepts batches only once its on-chain ID and creation meet the required finality. |
 | `placements` | `id` PK; original piece scope/CID FK, destination SP/dataset, lifecycle and current backend membership. Derive typed direct representation from the stored key. Index by piece/destination; allow multiple placements of a piece at one SP. Each frozen authorization has its own placement IDs. |
 | `transfers` | `id` PK; placement FK, source/endpoint, destination, exact versioned pull parameters, provider replay scope/correlation, issue/outcome and due fields. Persist before issue. JWT renewal changes credentials, not transfer identity. A successful item supplies staged availability. |
 | `batches` | `id` PK; destination/dataset, immutable unsigned ordered payload/digests and FWSS nonce claims, `frozen_at`, nullable signed authorization/exact provider request, observation and due fields. Persist signed bytes plus submission work before issue; once populated they are immutable. Each placement's first commitment deadline is retained across discovery/failover. |
 | `batch_entries` | PK `(batch_id, entry_index)`; placement FK and CID; `UNIQUE(placement_id)` and `UNIQUE(batch_id, piece_cid)`. Entries assign placements to frozen batches. Retry the same batch/authorization; alternatives use new placements and can reuse parked bytes. |
-| `staged_sources` | Exact provider/staging reference bound to scope and PieceCID, created from admission evidence or a successful pull item. Retain the known retention deadline, refresh due time, and requested deadline for an unresolved refresh. Publish renewed deadlines under the piece lock; provider calls run outside it. |
+| `staged_sources` | Source bound to scope and PieceCID: the selected provider and PieceCID from admission, or the exact provider staging reference from a successful pull. Retain the known retention deadline, refresh due time, and requested deadline for an unresolved refresh. Publish renewed deadlines under the piece lock; provider calls run outside it. |
 | `placement_memberships` | Current reverse lookup binds exact placements. Transfer/batch records hold current outcomes/revisions and required receipt/first-ID/count evidence. Retire invalidated mappings before replacement. Keep the operation due until its membership mapping and outcome application commit; retry from saved evidence. |
 | `removals` | Immutable external target, resolved placement and membership inclusion. Persist before issue, revalidate before retry and apply results to the recorded binding. |
 

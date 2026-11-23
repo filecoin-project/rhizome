@@ -51,7 +51,7 @@ The MSP checks staging limits, selects a provider, and persists an upload record
 
 | Field | Meaning |
 | --- | --- |
-| `uploadId` | Stable MSP correlation ID |
+| `uploadId` | Stable ID for the creation attempt and its selected provider |
 | `creationUrl` | Selected provider's absolute tus creation URL |
 | `uploadGrant` | Credential authorizing creation at that provider |
 | `maxSize` | Maximum permitted raw byte count |
@@ -59,7 +59,7 @@ The MSP checks staging limits, selects a provider, and persists an upload record
 
 The grant binds the upload ID, client, provider, size limit, optional expected PieceCID, and expiry. A known size is enforced exactly. Repeating preflight with the same client-scoped idempotency key and parameters returns the same upload identity; different parameters conflict.
 
-The upload grant is an MSP-signed JWT, sent as an Authorization bearer token and verified locally by the provider using the MSP's public keys. Claims include issuer, provider audience, expiry, upload ID, and the upload constraints above. Use asymmetric signing so providers cannot issue grants. The upload ID, not the token ID, remains the creation idempotency key across credential renewal.
+The creation grant is an MSP-signed JWT, sent as an Authorization bearer token and verified locally by the provider using the MSP's public keys. Use asymmetric signing so providers cannot issue grants. `creationExpiresAt` limits initial resource creation only. There is no grant renewal: if no resource was created by the deadline, the client can request fresh creation credentials with a new preflight key. Replaying the original preflight does not extend its deadline.
 
 Preflight authorizes staging only. It does not reserve funds or accept a storage obligation.
 
@@ -71,7 +71,7 @@ Unknown-length uploads use `Upload-Defer-Length: 1` and require the provider's `
 
 Transfer uses standard tus PATCH requests. After an interrupted or uncertain request, the SDK obtains the accepted offset through HEAD and resumes from there. The provider must persist bytes and offset before acknowledging them.
 
-The SDK retains the complete resource URL, including any deployment prefix. It forwards credentials only to authorized provider origins. HEAD, PATCH, and result lookup require authorization; credential renewal preserves the resource identity and does not extend its retention deadline.
+The SDK retains the complete resource URL, including any deployment prefix, and forwards credentials only to authorized provider origins. The provider establishes authenticated access to the created resource for HEAD, PATCH, and result lookup. This access does not depend on the creation grant remaining valid. The resource has its own expiry.
 
 Resumption requires replayable input. A consumed stream cannot resume after client process loss unless its bytes were spooled or can be regenerated.
 
@@ -79,7 +79,7 @@ Resumption requires replayable input. A consumed stream cannot resume after clie
 
 Tus Creation does not define idempotency. This design requires a provider extension: one resource per MSP upload ID.
 
-The provider atomically records the resource and its grant binding before responding. Repeated or concurrent creation with equivalent parameters returns the same resource URL without resetting its offset. Different parameters conflict. An expired or deleted resource cannot be recreated under the old grant; the provider retains that binding through the supported recovery window.
+The provider atomically records the resource and its grant binding before responding. Equivalent creation retries recover the existing resource without resetting its offset, subject to its access rules. Conflicting parameters fail. Neither a retry nor a fresh grant can recreate a deleted or expired resource under the old upload ID.
 
 ### Piece processing
 
@@ -91,11 +91,11 @@ The provider advertises the result URL in an application-specific link on creati
 
 ## AddPieces handoff
 
-The SDK signs the resulting PieceCID in AddPieces and supplies the upload ID alongside the signed payload. The MSP resolves the source through its own upload record, not a client-supplied retrieval URL.
+The SDK signs the resulting PieceCID in AddPieces and supplies the upload ID alongside the signed payload. The MSP uses its upload record to identify the selected provider, not a client-supplied retrieval URL. The result endpoint is for the SDK: the MSP does not verify the direct upload result or require proof that this particular upload supplied the piece.
 
-Before accepting the request, the MSP requires HTTP 200 from the selected provider's configured piece retrieval HEAD endpoint, with Content-Length matching the raw size encoded in the signed PieceCID. It also simulates the exact intended contract call to check authorization and funding.
+Before accepting the request, the MSP requires HTTP 200 from the selected provider's configured piece retrieval HEAD endpoint, with Content-Length matching the raw size encoded in the signed PieceCID. It establishes sufficient remaining retention for the piece at that provider independently of the upload result and simulates the exact intended contract call to check authorization and funding.
 
-Tus completion establishes byte receipt only. A parked result establishes readiness for the MSP's source check. Neither is storage acceptance. The SDK reports storage success only after successful client-facing AddPieces inclusion on chain; backend replication proceeds separately.
+Tus completion establishes byte receipt only. The parked result tells the SDK which PieceCID to submit. Neither is storage acceptance. The SDK reports storage success only after successful client-facing AddPieces inclusion on chain; backend replication proceeds separately.
 
 Upload retries do not create new AddPieces authorizations. Existing accepted-request replay semantics remain unchanged.
 
@@ -103,7 +103,7 @@ Upload retries do not create new AddPieces authorizations. Existing accepted-req
 
 Providers must trust MSP-issued grants and expose HTTPS upload and retrieval endpoints. Browser clients require CORS support on the upload and result endpoints.
 
-Credential expiry, unfinished-upload expiry, and parked-piece retention are separate deadlines. Retention must cover processing and admission recovery. Polling does not renew it. Once the MSP accepts AddPieces, upload expiry or source loss does not cancel its storage obligation.
+The creation deadline, unfinished-resource expiry, and parked-piece retention are separate. Creation-grant expiry does not stop or shorten an existing upload. Retention must cover processing and admission recovery. Polling does not extend it. Once the MSP accepts AddPieces, upload expiry or source loss does not cancel its storage obligation.
 
 Creation With Upload, parallel partial uploads, provider migration during transfer, and already-present-content deduplication are outside this proposal.
 
@@ -113,10 +113,10 @@ Before deployment, verify:
 
 - Lost preflight or creation responses and concurrent creation recover one upload resource.
 - Interrupted transfers and provider restarts preserve the accepted prefix and produce the correct PieceCID.
-- Size violations and commitment mismatches fail processing; expired grants cannot authorize new allocation.
-- Piece processing survives a lost final PATCH response; refreshed credentials recover the same resource and result.
+- Size violations and commitment mismatches fail processing. An expired creation grant cannot allocate a resource; an existing authorized resource can still resume and complete after the creation deadline.
+- Piece processing survives a lost final PATCH response; the client can recover its result without renewing creation credentials.
 - Uploads preserve resource URLs with deployment prefixes.
-- Unreadable pieces fail admission, and storage success remains tied to AddPieces inclusion.
+- An unavailable piece or insufficient retention blocks admission. A piece already present at the selected SP is eligible without proof of upload provenance. Storage success remains tied to AddPieces inclusion.
 
 ## Protocol reference
 

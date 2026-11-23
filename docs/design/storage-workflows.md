@@ -28,7 +28,7 @@ sequenceDiagram
     C->>A: Create tus resource and PATCH bytes
     C->>A: Read parked result
     C->>CS: Signed client-facing AddPieces with upload ID
-    CS->>A: Confirm retrieval and refresh parking if needed
+    CS->>A: Check signed PieceCID by HEAD and establish retention
     Note over CS: Validate request, funding context, admission eligibility
     Note over CS,TM: One local transaction: admission, transaction request, durable handoff
     CS->>SM: Durable provisional-interest delivery
@@ -49,7 +49,7 @@ sequenceDiagram
     and Backend protection
         SM->>SP: Authorize eager pulls with MSP JWTs
         Note over SP: Piece bytes move directly SP to SP
-        SM->>SP: Submit fixed signed AddPieces batches when ready/due
+        SM->>SP: Submit ready AddPieces batches to finalized datasets
         SP-->>SM: Outcomes, or recover through stable operation identity
         Note over SM: Apply exact placement outcomes and reconcile remaining demand
     end
@@ -63,7 +63,7 @@ Client-facing and backend operations proceed and reconcile independently.
 
 The [upload-preflight response](execution-and-integrations.md#upload-preflight-and-destination-handoff) supplies the MSP upload ID and the selected Upload SP's tus Creation URL and grant. The SDK creates the resource there, uploads or resumes it, reads the parked result, and submits AddPieces to MSP with an upload ID for every ordered entry.
 
-Before acceptance, confirm the source with [retrieval HEAD](execution-and-integrations.md#mandatory-confirmation-retrieval-head) and establish [sufficient remaining retention](execution-and-integrations.md#parking-refresh-and-retention), refreshing parking as needed. Neither the result lookup nor HEAD extends retention.
+The upload ID identifies the selected provider, not proof of the upload result. Before acceptance, check the signed PieceCID at that provider with [retrieval HEAD](execution-and-integrations.md#mandatory-confirmation-retrieval-head) and establish [sufficient remaining retention](execution-and-integrations.md#parking-refresh-and-retention) independently of the tus result.
 
 ### 2. Preflight and admission decision
 
@@ -95,7 +95,7 @@ In the running scenario, A needs backend commitment while B and C need transfers
 
 Persist the transfer identity and exact request before issue. Authorize staging with the [MSP pull JWT](execution-and-integrations.md#provider-pulls) and recover the same operation after a lost response. Use each successful pull item's staging reference and deadline for commitment and refresh scheduling; a staged source can also supply witnesses without counting as a committed placement.
 
-Batch independently ready placements by destination and urgency. Before freezing a batch, acquire affected piece locks in canonical order, recheck need and readiness, and atomically persist destination, ordered entries, exact payload, stable FWSS client nonce, and placement assignments. Follow the model's lock hierarchy for destination/operation records. Sign and submit after the transaction. Once authorization may have escaped, its payload and memberships remain immutable.
+Batch independently ready placements by destination and urgency. Before freezing a batch, acquire affected piece locks in canonical order, recheck need and readiness, and require a destination dataset with finalized creation. Atomically persist destination, ordered entries, exact payload, stable FWSS client nonce, and placement assignments. Follow the model's lock hierarchy for destination/operation records. Sign and submit after the transaction. Once authorization may have escaped, its payload and memberships remain immutable.
 
 The SP submits backend AddPieces. Recover through its persisted authorization, correlated receipt and scoped `clientNonces(payer, nonce)` outcome under the [recovery contract](execution-and-integrations.md#correlating-success-and-recovering-an-unknown-outcome).
 
@@ -132,7 +132,7 @@ Client service locks the admission, then the branch/request and enqueues updates
 ### Acceptance and concurrent replay
 
 1. Authenticate and correlate the request, then look up its logical key through FWSS nonce claims. Recover an equivalent accepted request before admission checks; compare the complete envelope, including any creation claim.
-2. For a new request, run mandatory contract preflight, source correlation/HEAD, staging-retention and admission gates. Before returning a gate failure, recheck whether a concurrent attempt accepted the request.
+2. For a new request, run mandatory contract preflight, bind each signed PieceCID to the provider selected in its upload record, and apply the retrieval HEAD, retention, and other admission gates. Before returning a gate failure, recheck whether a concurrent attempt accepted the request.
 3. In one transaction, insert admission/entries, claim add/create keys, enqueue the exact call and enqueue each entry's initial provisional state. Persist distinct source attribution and admission evidence.
 4. On uniqueness conflict, roll back the complete transaction. Load the winning operation in a fresh transaction and compare its bound request. Recover an equivalent operation or return a conflict for different semantics/ownership.
 5. After commit, wait for persisted signed bytes/hash and submission work, then return `201` with the original hash in `Location`. Workers discover accepted work independently of the HTTP connection.
@@ -143,9 +143,9 @@ Before commit, verify ordered indexes `0..N-1`, one entry/update per signed occu
 
 Apply interest updates under the piece lock: lock and reread the latest pending entry, apply a higher revision or discard a stale/equal update, retain withdrawn state/revision and delete the consumed pending row atomically. Make planning due with each applied change. Concurrent enqueue either updates the locked row first or inserts after deletion commits.
 
-Freeze batches under the [ordered locks](storage-model.md#multi-piece-batches-and-lock-order). Recheck need, the destination dataset's current creation result and placement assignment, then persist payload, nonce claims and ordered entries atomically. Sign after commit and persist signed authorization, provider request and submission work before issue. Retry the saved request; alternative authorizations use new placements and may reuse staged data.
+Freeze batches under the [ordered locks](storage-model.md#multi-piece-batches-and-lock-order). Recheck need, the destination dataset's finalized creation and accepting state, and placement assignment. Persist payload, nonce claims and ordered entries atomically. Sign after commit and persist signed authorization, provider request and submission work before issue. Retry the saved request; alternative authorizations use new placements and may reuse staged data.
 
-Create backend datasets under the destination lock, taking affected piece locks first. Persist creation intent and its nonce claim before signing; combined creation/addition claims both keys atomically. Only uncommitted internal candidates can change after a collision. Accepted or potentially issued authorizations retain their keys and payloads.
+Provision backend datasets separately from AddPieces. Under the destination lock, taking any affected piece locks first, persist standalone creation intent and its nonce claim before signing. Keep the dataset non-accepting until the creation and its on-chain ID meet the required finality. Transfers may stage data independently. Combined creation and initial addition remain supported for client-facing requests, not backend batches.
 
 ### Inclusion, acknowledgement, and reorgs
 
@@ -165,7 +165,7 @@ Explicitly withdrawn entries remain withdrawn. Otherwise terminal failure withdr
 
 Resolve removals to entry/placement, inclusion and exact external target at the authorization/observation view. Persist this binding before handoff, revalidate before issue/retry and apply later results to the recorded relationship. Reconcile escaped effects against their actual chain context.
 
-Invalidated backend creation makes its slot non-accepting. Validate the destination dataset's creation result under the dataset lock before freezing, and reopen after correlating its current on-chain ID. Resolve already-frozen requests against their recorded targets.
+An ordinary creation reorg affects only a non-accepting backend dataset; no batch can have been frozen against it. If the finality assumption fails, close the slot to new work and reconcile any possibly issued batches against their recorded targets.
 
 ### Durable discovery
 
@@ -184,8 +184,9 @@ The SDK follows [transaction inclusion](execution-and-integrations.md#sdk-transa
 | Admission transaction commits, then response or handoff is lost | Recover admission, transaction request, and handoff durably |
 | Interest deliveries reorder | Apply by source relationship and revision; old withdrawal cannot erase new interest |
 | Transfer response is lost, or owner dies after issuing work | Reconcile the stable operation; retain unknown outcome and fence stale local writes |
-| A parking refresh response is lost or the owner dies | Recover against the same staging reference and requested deadline; do not assume a renewal took effect |
+| A parking refresh response is lost or the owner dies | Recover against the same source key and requested deadline; do not assume the refresh took effect |
 | Batch formation is interrupted | Batch and placement assignments exist together or neither does |
+| Backend dataset creation has not reached finality | Do not freeze or issue AddPieces against that dataset; staging may proceed independently |
 | Backend outcome is missing or reorged | Resolve against the persisted authorization at an identified chain view; apply exact ordered memberships, or retain/reconcile unresolved work |
 | Client confirmation precedes replication, or later definitively fails | Report actual progress separately; on failure withdraw only that interest and reconcile shared/issued work |
 | Eligibility falls after acceptance | Preserve demand and replan; do not discard the obligation |
