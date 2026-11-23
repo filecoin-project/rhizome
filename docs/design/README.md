@@ -31,7 +31,7 @@ Separate product commitments, protocol deadlines, configurable policy and estima
 
 ### 2. Close external contracts
 
-- **Curio witnesses:** close the architecture's Q1 with the Curio team. Verify PieceCID-based witnesses for staged and committed data, including authorization, limits, and a first applicable proof before backend commitment.
+- **Curio witnesses:** review the standalone [Curio inclusion proof proposal](../proposals/curio-inclusion-proof-proposal.md) to close the architecture's Q1 with the Curio team. Verify PieceCID-based witnesses for staged and committed data, including authorization, limits, and a first applicable proof before backend commitment.
 - **Synapse:** integrate tus Creation, offset resume, SDK result recovery and per-entry upload routing IDs; verify terms-aware creation signing and signed-request replay while preserving [transaction-hash waiting](execution-and-integrations.md#sdk-transaction-waiting).
 - **Curio upload, staging and pulls:** implement creation-only JWT grants, authenticated resource access and result recovery independent of grant expiry, PieceCID-based retention for direct-upload sources, and pull authorization and replay using MSP JWTs. Verify recovery after lost Creation responses, retention against execution/recovery budgets, cleanup races, and partial pull outcomes.
 - **Curio backend AddPieces:** establish recovery of provider-local tracking if submission escapes before membership tracking is durable.

@@ -180,13 +180,13 @@ The creation deadline does not limit an existing upload. Unfinished-resource exp
 
 MSP authorizes the destination SP's pull through the same MSP JWT trust and verification contract as tus uploads. Issue a pull-scoped token for the destination, not a forwarded client upload grant. Bind the stable transfer ID and exact pull parameters, including the expected PieceCID(s), source URL(s), and any byte limits, directly or through a request digest. Reissue expired credentials without changing the transfer ID or parameters. The pull authorizes staging, not a PDP membership, and does not require an FWSS signature or a frozen AddPieces batch. The subsequent commitment keeps its own authorization and nonce.
 
-Curio must recover pull status by stable transfer ID scoped to the MSP issuer and destination service. Repeating the same parameters returns the existing operation; different parameters conflict. Apply success to each matching item, not from aggregate status, and return the exact staging reference and retention deadline for each parked piece. Use a new transfer identity for materially changed work. The pinned Curio pull handler keys work on signed `extraData` and performs exact AddPieces simulation; replacing that authorization and lookup is a Curio integration dependency.
+Curio must recover pull status by stable transfer ID scoped to the MSP issuer and destination service. Repeating the same parameters returns the existing operation; different parameters conflict. Apply success to each matching item, not from aggregate status, and return the exact staging reference and retention deadline for each parked piece. Use a new transfer identity for materially changed work. The pinned Curio pull handler keys work by service, signed `extraData` hash, dataset ID, and record keeper, and simulates AddPieces before creating new work. MSP transfer identity and authorization independent of AddPieces remain Curio integration dependencies.
 
-Destination SPs must be able to fetch and verify the piece from the configured HTTPS source within their network and URL policies. The JWT authorizes the pull request at the destination, not the source GET. Initially use the existing public retrieval GET; a source requiring credentials needs a separate scoped read contract with the same direct data path.
+Destination SPs must be able to fetch and verify the piece from the configured HTTPS source within their network and URL policies. The JWT authorizes the pull request at the destination, not the source GET. Initially use the existing public retrieval GET. Curio supports forwarding a Keysmith FOC-Grant for a restricted source; MSP still needs a separate scoped read contract to use it.
 
 ## Source and SDK evidence
 
-Contract and Curio findings come from source review of Curio `0073d178`, Synapse `f57ff11`, FWSS `352b614`, and PDP. Local Synapse exercises showed:
+Contract and Curio findings come from source review of Curio `fea0f868`, Synapse `f57ff11`, FWSS `352b614`, and PDP. Local Synapse exercises showed:
 
 - With fixture PieceCIDs, an explicit nonce reproduced the authorization. Changing nonce, client dataset ID, piece order, or the encoding of empty metadata invalidated the original signature. Default signing generated distinct nonces, and duplicate entries retained their positions.
 - The legacy streaming SDK discarded the cross-origin upload host. The tus SDK must preserve and use the provider's URLs.
@@ -206,11 +206,11 @@ Contract and Curio findings come from source review of Curio `0073d178`, Synapse
 - [FWSS signature hashing/authorizer boundary](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/lib/LibSignatureVerification.sol)
 - [FWSS public nonce lookup](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/modules/FWSSViewModule.sol)
 - [PDP atomic addition and ID assignment](https://github.com/FilOzone/pdp/blob/3d486ae9ef6a5040acd55a0430307aa2802103c5/src/PDPVerifier.sol)
-- [Curio addition conversion, duplicate checks, and response](https://github.com/filecoin-project/curio/blob/0073d178dcf430db37def3bb55fc279da348121c/pdp/handlers_add.go)
-- [Curio existing pull authorization and replay](https://github.com/filecoin-project/curio/blob/0073d178dcf430db37def3bb55fc279da348121c/pdp/handlers_pull.go)
+- [Curio addition conversion, duplicate checks, and response](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/pdp/handlers_add.go)
+- [Curio existing pull authorization, replay, and grant forwarding](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/pdp/handlers_pull.go)
 - [Synapse chain-only wait and nonce recovery](https://github.com/FilOzone/synapse-sdk/blob/f57ff119966b483205263b513b1220dd869415b6/packages/synapse-core/src/sp/wait-for-receipt.ts)
-- [Curio open-pieces placement](https://github.com/filecoin-project/curio/blob/0073d178dcf430db37def3bb55fc279da348121c/tasks/openpieces/task_place.go)
-- [Curio retrieval resolution](https://github.com/filecoin-project/curio/blob/0073d178dcf430db37def3bb55fc279da348121c/lib/cachedreader/hashspace_stage.go)
-- [Curio piece HTTP serving](https://github.com/filecoin-project/curio/blob/0073d178dcf430db37def3bb55fc279da348121c/market/retrieval/piecehandler.go)
-- [Curio unclaimed-reference cleanup](https://github.com/filecoin-project/curio/blob/0073d178dcf430db37def3bb55fc279da348121c/tasks/pdpv0/task_piece_gc.go)
-- [Curio retention defaults](https://github.com/filecoin-project/curio/blob/0073d178dcf430db37def3bb55fc279da348121c/deps/config/types.go)
+- [Curio open-pieces placement](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/tasks/openpieces/task_place.go)
+- [Curio retrieval resolution](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/lib/cachedreader/hashspace_stage.go)
+- [Curio piece HTTP serving](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/market/retrieval/piecehandler.go)
+- [Curio unclaimed-reference cleanup](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/tasks/pdpv0/task_piece_gc.go)
+- [Curio retention defaults](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/deps/config/types.go)
