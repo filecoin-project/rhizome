@@ -62,8 +62,6 @@ Build one tree for a small piece. For large pieces, adapt Curio's [cached proof 
 
 Derive the maximum tree height as `log2(maxPaddedPieceBytes / 32)`: depth 31 at Curio's [64 GiB PDPv0 limit](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/pdp/README.md#L49-L53). Start with at most 32 indices per request. At that size and depth, compact JSON uses at most 369 request bytes and about 71 KiB of response; the proposed body caps are 4 KiB and 128 KiB.
 
-Set the batch cap from measured storage cost before rollout. At Curio's [4 MiB snapshot section size](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/tasks/pdpv0/task_save_cache.go#L25-L28), 32 distinct sections can cover 128 MiB of padded data. Independently bound storage/cache reads, memory, per-service and global concurrency, and elapsed time including queueing. The MSP caps each attempt to leave time for fallback and submission.
-
 ## Review and acceptance
 
 Agree on service access rules, readiness, and operating limits with Curio. Verify against the target Curio build and PDP verifier:
