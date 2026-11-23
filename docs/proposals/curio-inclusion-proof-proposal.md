@@ -16,7 +16,7 @@ The MSP [resolves challenges to piece-relative leaf indices](https://github.com/
 {"leafIndices":[1]}
 ```
 
-`leafIndices` contains 1–32 distinct integers in `[0, 2^h)`, where `h` is the CID's tree height in edges. Indices count 32-byte leaves in the full Fr32 tree, not raw bytes. Padding-only leaves are valid here but do not demonstrate possession; use the [verifier's challenge range](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/Cids.sol#L93-L104) for PDP.
+`leafIndices` is a nonempty array of distinct integers in `[0, 2^h)`, where `h` is the CID's tree height in edges. Indices count 32-byte leaves in the full Fr32 tree, not raw bytes. Padding-only leaves are valid here but do not demonstrate possession; use the [verifier's challenge range](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/Cids.sol#L93-L104) for PDP.
 
 `200 OK` returns all witnesses in request order. Each `leaf` is the Fr32 leaf itself; `siblings` has exactly `h` nodes, nearest first, excluding the root. Encode nodes as `0x` plus 64 lowercase hex digits. All responses use `Cache-Control: no-store`.
 
@@ -60,7 +60,9 @@ Reuse Curio's [PDPv0 staged cache task](https://github.com/filecoin-project/curi
 
 Build one tree for a small piece. For large pieces, adapt Curio's [cached proof primitive](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/lib/proof/cached_proof.go#L89-L184) to reuse the upper tree and read each challenged section once per batch. Do not scan large pieces, unseal on demand, or fetch from another provider. Keep the source readable through cleanup or handoff, or fail the request.
 
-Proposed wire caps: 4 KiB request, 128 KiB response, height at most 50. Independently bound storage/cache reads, memory, concurrency per service and globally, and elapsed time including queueing. The MSP caps each attempt to leave time for fallback and submission. Set operational limits from measurements before rollout.
+Derive the maximum tree height as `log2(maxPaddedPieceBytes / 32)`: depth 31 at Curio's [64 GiB PDPv0 limit](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/pdp/README.md#L49-L53). Start with at most 32 indices per request. At that size and depth, compact JSON uses at most 369 request bytes and about 71 KiB of response; the proposed body caps are 4 KiB and 128 KiB.
+
+Set the batch cap from measured storage cost before rollout. At Curio's [4 MiB snapshot section size](https://github.com/filecoin-project/curio/blob/fea0f8680ede3a995c1c0c1073cc90a2a392e4a6/tasks/pdpv0/task_save_cache.go#L25-L28), 32 distinct sections can cover 128 MiB of padded data. Independently bound storage/cache reads, memory, per-service and global concurrency, and elapsed time including queueing. The MSP caps each attempt to leave time for fallback and submission.
 
 ## Review and acceptance
 
@@ -69,4 +71,4 @@ Agree on service access rules, readiness, and operating limits with Curio. Verif
 - Complete the first PDP round from a parked copy before backend AddPieces, including a large piece, restart during cache preparation, and concurrent upload/proof load. Measure preparation and witness latency.
 - Verify identical witnesses after commitment and during cleanup or handoff; check boundary and padding positions, reject wrong CID/index/depth and tampering, and submit a proof to the target verifier.
 - Reject credentials across key domains, invalid JWT claims, cross-service access, and missing or invalid private grants, including on warm caches. Confirm `404` does not disclose existence.
-- Exercise maximum batches, cache misses, timeouts, and saturation. Check resource bounds, cancellation, and fallback within the original deadline.
+- Exercise maximum batches with clustered indices and indices spread across distinct snapshot sections, plus cache misses, timeouts, and saturation. Check resource bounds, cancellation, and fallback within the original deadline.
