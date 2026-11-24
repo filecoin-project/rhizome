@@ -39,7 +39,7 @@ A storage relationship between two parties governed by selected storage terms. T
 A content-addressed unit of data identified by a PieceCID. Its identity is separate from the storage deals and datasets in which it participates.
 
 **Client interest**:
-A client's requirement that MSP maintain protection for a piece under a client-facing storage relationship.
+A client's requirement that MSP maintain protection for a piece under a client-facing storage relationship. A deleting interest keeps copies available for proving until the on-chain removal is sufficiently confirmed.
 
 **Placement**:
 A specific storage relationship for a piece at an SP, including its backend dataset membership once committed. It is the unit of repair, may serve multiple client storage deals, and remains distinct from other placements of the same piece at the same SP.

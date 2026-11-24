@@ -100,13 +100,19 @@ Proceed with dependent work at inclusion. If a reorg removes it, keep accepted d
 - **Client-facing addition:** if its client nonce is unconsumed in the new chain view, resubmit the original authorization under the same admission. Transaction management handles sending-account nonces and replacement.
 - **Backend addition:** resolve the previous operation against the new view, then resume the required placement and commit flow, reusing parked bytes where possible. Preserve operation-to-membership correlation through recovery.
 
-Continue reconciliation after SDK success. Other chain actions use their own confidence rules.
+Continue reconciliation after SDK success. This inclusion boundary does not satisfy the separate [confidence gate for irreversible actions](#chain-confidence-for-irreversible-actions).
 
 ### SDK transaction waiting
 
 The SDK's `waitForAddPieces` and `waitForCreateDataSetAddPieces` wait on chain receipts and recover using FWSS nonce state. Preserve this completion path for MSP: return the real transaction hash, and let the SDK derive success and assigned IDs from chain evidence.
 
 The pinned SDK's [nonce fallback](https://github.com/FilOzone/synapse-sdk/blob/f57ff119966b483205263b513b1220dd869415b6/packages/synapse-core/src/warm-storage/submission-result.ts#L75-L84) does not match the signed contents. If a different authorization consumes the same payer nonce, the fallback can report that operation's outcome for the original request. This is a known SDK limitation, not a launch blocker: the SDK uses fresh nonces by default, and the practical case is deliberate reuse across different authorizations. MSP still applies the stricter correlation rule below.
+
+## Chain confidence for irreversible actions
+
+Before authorizing an action whose effects a chain reorg cannot undo, require its authorizing chain evidence to be canonical and at least the configured confirmation depth for that chain deployment. Start with a tentative value of 50 epochs for Filecoin. Depth is the observed canonical head epoch minus the evidence epoch, after confirming ancestry; a reorged observation never qualifies. This is a confirmation policy, not a finality guarantee. An action with a stricter requirement retains it.
+
+Retain the evidence reference and recheck applicability before issuing the action. A known fork or unavailable confidence evidence blocks new destructive work until reconciliation. If an action already escaped, reconcile that exact operation; do not assume the fork reversed its external effect.
 
 ## Correlating success and recovering an unknown outcome
 

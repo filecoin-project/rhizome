@@ -56,7 +56,7 @@ Transaction management, Chain access, provider HTTP adapters, and the signing in
 
 ### Two important ownership boundaries
 
-- **Client requirements and backend work:** Client service determines what MSP should fulfill. Storage management decides how shared placements satisfy those requirements. A client removal withdraws demand; Storage management reconciles the backend copies asynchronously.
+- **Client requirements and backend work:** Client service determines what MSP should fulfill. Storage management decides how shared placements satisfy those requirements and reconciles backend copies asynchronously.
 - **Domain decisions and external execution:** Domain modules create durable operations and interpret the results. Transaction management and adapters execute those operations. Modules own their records and expose interfaces to other modules.
 
 PostgreSQL preserves accepted obligations and necessary results across instances. Use durable handoffs for independently owed work and retain recovery facts under the [recovery principle](engineering/principles.md#failure-must-not-create-an-unrecoverable-state).
@@ -156,7 +156,7 @@ Reuse compatible established and in-flight placements across client interests an
 
 ## Client piece removal and asynchronous backend removal
 
-Removing a client-facing piece withdraws its interest. Keep shared placements while other interests need them; authorize backend removal separately and execute it asynchronously. If the piece is added again after removal has been issued, reconcile both operations against their own placements.
+Scheduling a client-facing removal leaves the piece provable. The [deleting interest](design/storage-model.md#client-piece-deletion) retains backend copies until on-chain deletion meets the configured confidence threshold. Authorize backend removal separately; keep copies that other interests need. If the piece is added again after removal has been issued, reconcile both operations against their own placements.
 
 ## Client termination and the funding buffer
 
@@ -182,9 +182,11 @@ One owner collects witnesses under a short renewable PostgreSQL-time lease. Run 
 
 A successor retains valid witnesses, requests missing slots, and works to the original deadline. Budget expiry, discovery, scheduling, reload, revalidation, and submission within that deadline. Provider request deadlines and fallback handle slow providers; lease expiry handles owner failure.
 
-Before submission, confirm that the chain challenge context remains applicable. A ready round creates durable submission work keyed by round context, so collectors do not submit competing proofs.
+Start collection as soon as one coherent chain view supplies the challenge seed and piece mapping. The verifier [schedules the challenge epoch in advance](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1234-L1274), and [Lotus derives the seed from the signed output of the drand round for that epoch](https://github.com/filecoin-project/lotus/blob/b3be770e0e236f50cc713bbe36c96f08ec3fe779/chain/rand/rand.go#L145-L213). Extra chain depth does not stabilize that seed; a reorg can still change the on-chain schedule or targets. Revalidate the context, proof status, and remaining inclusion time before submission. A ready round creates durable submission work keyed by round context, so collectors do not submit competing proofs.
 
-Proving owns `processPieceDeletions` as part of advancing the proving period. Processing deletions [clears the verifier's scheduled challenge](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1044-L1070). For an active period, reconcile proof inclusion or expiry, including any in-flight submission, before processing scheduled deletions. Complete those deletion batches before calling `nextProvingPeriod`.
+Proving owns `processPieceDeletions` as part of advancing the proving period. Processing deletions [clears the verifier's scheduled challenge](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1044-L1070). For an active period, reconcile proof inclusion or expiry, including any in-flight submission, before processing scheduled deletions. Complete those deletion batches before calling `nextProvingPeriod`. Proving can advance on canonical outcomes and reconcile reorgs without waiting for the confidence required to release backend copies.
+
+Begin with one MSP sending account per chain for client-facing proving. Give proving work priority before nonce allocation and bound outstanding ordinary nonces on that account: a proof cannot overtake an already assigned lower nonce.
 
 
 ## Chain inputs: receipt-first reconciliation
@@ -193,7 +195,7 @@ Use MSP transaction receipts first, targeted current-state reads for facts the r
 
 ### Required recovery behavior
 
-After an outage, reconcile the current lifecycle state of known client and backend resources and interrupted operations, including lasting changes such as dataset termination. Discover managed resources not yet mapped locally. Recovery needs an identified consistent chain view and reorg handling; RPC methods, state references, freshness, and action-specific confidence remain integration decisions.
+After an outage, reconcile the current lifecycle state of known client and backend resources and interrupted operations, including lasting changes such as dataset termination. Discover managed resources not yet mapped locally. Recovery needs an identified consistent chain view and reorg handling. RPC methods, state references, and freshness remain integration decisions; apply the [confidence gate for irreversible actions](design/execution-and-integrations.md#chain-confidence-for-irreversible-actions).
 
 ### Chain-access boundary
 

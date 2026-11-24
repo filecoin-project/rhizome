@@ -56,11 +56,11 @@ Specify ordinary repair, provider/dataset-wide replacement, bounded overlapping 
 
 **Unresolved:** Decide when a stalled, unresolved backend commitment stops counting as planned protection so it no longer blocks a bounded alternative, especially for sole-copy data. Continue reconciling the original operation and apply late success to its exact placement before replanning.
 
-**Review gate:** concurrent planners, remove/re-add with reversed outcomes, and takeover preserve the model's invariants. Representative cost estimates show urgent work is not starved.
+**Review gate:** concurrent planners, remove/re-add with reversed outcomes, and takeover preserve the model's invariants. Exercise a reorg during the deletion confirmation window and confirm no backend copy is retired based on invalidated evidence. Representative cost estimates show urgent work is not starved.
 
 ### 5. Complete proving, assessment, and financial lifecycle
 
-Budget a full proof round including collection, fallback, takeover, and submission. Persist accepted witnesses, retain the original deadline, and keep failed-provider observations even after successful fallback.
+Budget a full proof round including collection, fallback, takeover, sender-nonce queueing, and submission. Persist accepted witnesses, retain the original deadline, and keep failed-provider observations even after successful fallback. Exercise a reorg that leaves the beacon seed unchanged but changes the applicable challenge context before submission.
 
 Specify payer/asset-scoped settlement and funding monitoring, adjustable grace/holds, operator-approved termination with rechecks, and initial run-off behavior. Keep settlement intent separate from actual progress, and payment shortfall separate from provider failure/deletion.
 

@@ -51,9 +51,15 @@ For a particular interest, accounting must distinguish:
 - **Planned protection:** suitable outstanding placement work, including transfers and unresolved commitments, used to calculate the remaining deficit. When a stalled commitment stops counting is [unresolved](README.md#4-complete-storage-maintenance-and-retrieval).
 - **Outgoing protection:** placements with authorized removals, excluded from established protection.
 
-Count distinct suitable SPs toward each interest's three-SP target. Shared placements can satisfy several interests simultaneously.
+Count distinct suitable SPs toward each active interest's three-SP target. Shared placements can satisfy several interests simultaneously.
 
 Alice and Bob can share three suitable placements. Alice's withdrawal leaves the protection Bob requires in place. Coordinate this sharing [per piece](#planning-consistency-protocol).
+
+### Client piece deletion
+
+Client service publishes `deleting` after canonical inclusion of [`PiecesScheduledForRemoval`](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1029-L1040) for the exact membership. The piece can still be challenged. Under the piece lock, Storage management retains all usable committed copies; do not intentionally downsize because an interest is deleting. If there is no continuing, authorized, witness-capable committed copy, plan to establish one. A staged copy can supply witnesses or repair bytes but does not satisfy this requirement. Other active interests still require their normal protection.
+
+Proving processes scheduled deletions and supplies the exact [`PiecesRemoved`](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1093-L1110) outcome to Client service. Publish `deleted` only when that membership's removal meets the [irreversible-action confidence gate](execution-and-integrations.md#chain-confidence-for-irreversible-actions). `deleted` contributes no demand. Retain the release evidence with the revisioned interest update and validate its branch before authorizing or issuing removals that depend on it. If a reorg invalidates the removal or its confidence, republish `deleting` if the schedule still applies, or `confirmed` if it no longer does and the membership remains live. Preserve the removal intent for reconciliation. Never apply an old outcome to a re-added membership.
 
 ## Invariants and atomicity
 
@@ -193,7 +199,7 @@ CREATE TABLE client.entries (
     source_revision bigint NOT NULL DEFAULT 1 CHECK (source_revision > 0),
     service_requested boolean NOT NULL DEFAULT true,
     source_state text NOT NULL
-        CHECK (source_state IN ('provisional', 'confirmed', 'withdrawn')),
+        CHECK (source_state IN ('provisional', 'confirmed', 'deleting', 'deleted', 'withdrawn')),
     PRIMARY KEY (admission_id, entry_index)
 );
 ```
@@ -202,7 +208,7 @@ CREATE TABLE client.entries (
 
 Entries retain their PieceCID and selected SP. `admission_evidence` associates each ordered entry with its MSP upload ID for routing and retains [parked-source evidence](execution-and-integrations.md#parked-source-evidence) by `(source_sp, piece_cid)`, including trusted endpoint/version, observation time, and guaranteed deadline. Share evidence for the same source and PieceCID. Decode raw size from the signed v2 CID. Transport upload IDs do not prove provenance or change the signed authorization or accepted admission identity.
 
-`source_revision` orders the interest updates Client service publishes for an entry; `source_state` holds its published interest state. `service_requested` records the client's continuing service intent. Acceptance sets it true; an explicit domain withdrawal clears it. A chain-derived failure can withdraw published interest while preserving that intent for reorg recovery. Request cancellation preserves accepted intent.
+`source_revision` orders the interest updates Client service publishes for an entry; `source_state` holds its published interest state. `service_requested` records the client's continuing service intent, not the current retention requirement. Acceptance sets it true; explicit withdrawal clears it. A chain-derived admission failure can publish `withdrawn` while preserving the intent for reorg recovery. For an on-chain removal use the [deletion states](#client-piece-deletion), not `withdrawn`. Request cancellation preserves accepted intent.
 
 ### Execution, inclusion, and acknowledgement records
 
@@ -218,7 +224,7 @@ Record keys and fields follow. Use foreign keys within a module and owner APIs f
 | `chain.reconciliation_basis` / Shared chain access | PK `chain_key`; observed branch token. It changes on a known fork and remains stable through ordinary head advances. Publication and outcome reads hold a shared row lock while validating it. |
 | `client.inclusions` / Client service | PK `(admission_id, inclusion_revision)`; verifier, dataset, first assigned piece ID, entry count and receipt reference. Admission-scoped FK from `admissions.current_inclusion_revision`. |
 | `client.memberships` / Client service | Current reverse lookup: PK `(chain_key, verifier, data_set_id, piece_id)`; `UNIQUE(admission_id, entry_index)`; entry and inclusion FKs. Retire invalidated mappings before installing replacements. Derive historical ordered IDs from validated first-ID/count and immutable entries. |
-| `client.removals` / Client service | Resolved `(admission_id, entry_index, inclusion_revision)`, exact chain/verifier/dataset/piece target, and immutable authorization/observation reference. Persist before handoff or issue and apply results to that binding. |
+| `client.removals` / Client service | Resolved `(admission_id, entry_index, inclusion_revision)`, exact chain/verifier/dataset/piece target, and immutable authorization/observation reference. Persist before handoff or issue; apply scheduling and processing outcomes to that binding. Retain the evidence used to release demand. |
 | `payments.reconcile_due` / Payments | PK `(chain_key, fwss, payer, client_data_set_id)`; due time, evidence hint and work ownership. Coalesces dataset-discovery requests. Payments resolves and observes shared account/rail scope through receipts or targeted state reads. |
 
 The **inclusion revision** is the outcome revision that established the current successful inclusion. Carry it through subsequent evidence updates. Invalidation clears it; restoration or a changed binding uses the new outcome revision. Revalidate inclusions against the current branch token before applying their mappings.
@@ -239,8 +245,8 @@ Client service owns each admission entry and publishes its requested service sta
 
 | Record / owner | Required fields and constraints |
 | --- | --- |
-| `storage.interest_updates` / Storage management | PK `(admission_id, entry_index)`; latest revision, complete mutable source state/membership context, scope/CID lock key, payload version and due time. Upsert only a higher revision; same revision/different payload is a contract violation. Initial source attribution is supplied once and retained until copied into the applied interest. |
-| `storage.interests` / Storage management | PK `(admission_id, entry_index)`; immutable scope/CID and initial source attribution, applied revision, state and membership context. Index by piece. Retain withdrawn state and revision to reject delayed updates. |
+| `storage.interest_updates` / Storage management | PK `(admission_id, entry_index)`; latest revision, complete mutable source state/membership context and applicable release evidence, scope/CID lock key, payload version and due time. Upsert only a higher revision; same revision/different payload is a contract violation. Initial source attribution is supplied once and retained until copied into the applied interest. |
+| `storage.interests` / Storage management | PK `(admission_id, entry_index)`; immutable scope/CID and initial source attribution, applied revision, state and membership context, and applicable release evidence. Index by piece. Retain withdrawn/deleted state and revision to reject delayed updates. |
 
 `storage.pieces.plan_after` schedules per-piece reconciliation:
 
