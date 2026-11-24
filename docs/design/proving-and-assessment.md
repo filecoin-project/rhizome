@@ -15,7 +15,9 @@ MSP proves its client-facing datasets. Backend SPs prove their own datasets inde
 
 ## Chain schedule and round identity
 
-Use receipt-first reconciliation, with current-state reads when a receipt is missing, revised, or insufficient. Read dataset liveness, sender and listener, current challenge epoch and range, queued removals, and FWSS activation, deadline, `provenThisPeriod`, configuration, and lifecycle end from one view. Relevant source: [PDP getters](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L375-L437), [FWSS schedule views](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/modules/FWSSViewModule.sol#L259-L335), and [FWSS proof validation](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/modules/FWSSProvingModule.sol#L53-L88). In particular, the verifier's last-proven epoch is also initialized by `nextProvingPeriod`; it is not evidence that this FWSS period was proven.
+Use receipt-first reconciliation, with current-state reads when a receipt is missing, revised, or insufficient. Read dataset liveness, sender and listener, current challenge epoch and range, queued removals, and FWSS deadline, `provenThisPeriod`, configuration, and lifecycle end from one view. Reuse the dataset's applicable activation observation as described below. Relevant source: [PDP getters](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L375-L437), [FWSS schedule views](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/modules/FWSSViewModule.sol#L259-L335), and [FWSS proof validation](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/modules/FWSSProvingModule.sol#L53-L88). The verifier's last-proven epoch is also initialized by `nextProvingPeriod`; it is not evidence that this FWSS period was proven.
+
+FWSS [sets the activation epoch on first activation and preserves it across reactivation](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/modules/FWSSProvingModule.sol#L108-L131); [dataset deletion clears it](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/modules/FWSSDataSetModule.sol#L276-L317). Record a positive epoch once on the dataset with its observation view. For the same live dataset and listener, reuse it when that view is the current view or a known ancestor. The pinned [verifier binds the listener at dataset creation](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L682-L697). If there is no applicable observation, read activation from the coherent chain view. Do not cache zero as proof that activation has not happened. After a fork, replace or clear invalidated activation evidence under the branch and worker fences before using it for a new decision.
 
 The effective submission window begins at the later of the scheduled challenge epoch and the FWSS window start. It ends at the earlier of the FWSS proving deadline and any applicable PDP lifecycle end, inclusive in the reviewed contracts ([PDP](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1116-L1124), [FWSS lifecycle guard](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/lib/LibServiceLifecycleGuards.sol#L9-L15)). Use epochs for chain decisions. Wall-clock projections wake workers and budget latency; they do not establish that a round has missed or that a null epoch has passed.
 
@@ -23,11 +25,11 @@ Start collection when the seed and mapping are available from a coherent chain v
 
 Read `challengeRange`, not total dataset leaves. For each required proof index, compute [the verifier's challenge](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1128-L1151): Keccak-256 of the packed seed, dataset ID, and index (32, 32, and 8 bytes respectively), reduced modulo the nonzero range. Resolve indices with [batched `findPieceIds`](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1423-L1436); fetch the expected PieceCID for each distinct piece ID. Read the proof count from the deployed listener configuration, not a compiled-in count. Resolve and verify the matching local membership and authorization scope before publishing a complete plan. On missing bindings, wake on membership application and retry by deadline; do not ask an SP about an unbound target.
 
-Hash a versioned, unambiguous encoding of the dataset key, sender, listener and supported verifier/listener profile, FWSS period binding (activation and deadline), effective window, challenge epoch, seed, challenge range, and ordered `(verifier_piece_id, piece_cid, leaf_index, authorization_scope)` targets into `context_key`. Use fixed-width integers and addresses and length-prefixed variable fields. Persist the observation reference separately; do not hash the head block, freshness, wallet balance, or provider choice into the identity. Ordinary head advance must not create a new round. A complete plan is immutable and may be selected again after revalidation. A changed context selects a different round; it does not mutate old slots or implicitly copy witnesses across rounds. Takeover of the same context retains already verified needs.
+Hash an unambiguous encoding of the dataset key, sender, observed listener, FWSS period binding (activation and deadline), effective window, challenge epoch, seed, challenge range, and ordered `(verifier_piece_id, piece_cid, leaf_index, authorization_scope)` targets into `context_key`. Use fixed-width integers and addresses and length-prefixed variable fields. Proving uses the pinned verifier and FWSS rules; there is no per-round ruleset selector. Do not hash the observation view, freshness, wallet balance, or provider choice into the identity. Ordinary head advance must not create a new round. A complete plan is immutable and may be selected again after revalidation. A changed context, including a changed activation epoch, selects a different round; it does not mutate old slots or implicitly copy witnesses across rounds. Takeover of the same context retains already verified needs.
 
 ## PostgreSQL records
 
-Illustrative migration, using the [shared SQL domains](storage-model.md#acceptance-records). UUIDs are allocated before insertion. FKs are internal to Proving; opaque IDs across modules use owner APIs. Keep the dataset queue schema compatible across overlapping releases. Round and action payloads have their own format versions; enable a new write format only after every worker that can claim those datasets supports it.
+Illustrative migration, using the [shared SQL domains](storage-model.md#acceptance-records). UUIDs are allocated before insertion. FKs are internal to Proving; opaque IDs across modules use owner APIs. Evolve typed round records through compatible SQL migrations. Version the encoding of action `expected_state` in the payload itself. Enable writes after all workers that can claim the affected datasets can read them.
 
 ```sql
 CREATE SCHEMA proving;
@@ -37,9 +39,12 @@ CREATE TABLE proving.datasets (
     chain_key text NOT NULL,
     verifier evm_address NOT NULL,
     onchain_dataset_id uint256 NOT NULL,
+    activation_epoch bigint CHECK (activation_epoch > 0),
+    activation_view bytea,
     checked_branch text,
     active_round_id uuid,
-    UNIQUE (chain_key, verifier, onchain_dataset_id)
+    UNIQUE (chain_key, verifier, onchain_dataset_id),
+    CHECK ((activation_epoch IS NULL) = (activation_view IS NULL))
 );
 CREATE INDEX proving_by_chain ON proving.datasets (chain_key, id);
 
@@ -57,12 +62,9 @@ CREATE TABLE proving.rounds (
     id uuid PRIMARY KEY,
     dataset_id uuid NOT NULL REFERENCES proving.datasets(id),
     context_key evm_hash NOT NULL,
-    format_version integer NOT NULL CHECK (format_version > 0),
-    profile text NOT NULL,
     origin_view bytea NOT NULL,
     sender evm_address NOT NULL,
     listener evm_address NOT NULL,
-    activation_epoch bigint NOT NULL CHECK (activation_epoch >= 0),
     challenge_epoch bigint NOT NULL CHECK (challenge_epoch > 0),
     submit_from_epoch bigint NOT NULL,
     period_deadline_epoch bigint NOT NULL,
@@ -108,7 +110,6 @@ CREATE TABLE proving.actions (
     kind text NOT NULL CHECK (kind IN ('activate', 'prove', 'process_deletions', 'advance')),
     action_key evm_hash NOT NULL,
     attempt_no integer NOT NULL CHECK (attempt_no > 0),
-    intent_version integer NOT NULL CHECK (intent_version > 0),
     expected_state bytea NOT NULL CHECK (octet_length(expected_state) > 0),
     tx_request_id uuid NOT NULL UNIQUE,
     applied_outcome_revision bigint NOT NULL DEFAULT 0 CHECK (applied_outcome_revision >= 0),
@@ -133,7 +134,11 @@ CREATE TABLE proving.witness_failures (
 CREATE INDEX proving_failures_due ON proving.witness_failures (observed_at, attempt_id);
 ```
 
+`activation_view` identifies the view that established the saved dataset activation. A null epoch and view mean there is no cached activation, not that the dataset is known to be inactive. Publish activation changes under the dataset lock and branch/worker fences. A changed activation does not rewrite historical rounds or the expected state of issued actions.
+
 `origin_view` identifies the planning view in Chain access's encoding; `checked_branch` is the opaque token for the schedule last reconciled. Neither makes a stored round chain-current. A round, its ordered slots and deduplicated needs, and the dataset's active pointer are installed in one transaction. SQL enforces uniqueness and same-round references; the writer checks complete contiguous slots `0..slot_count-1`, correct bindings, and needs referenced by at least one slot. The reader checks completeness before assembly. Siblings are concatenated 32-byte nodes in verifier order. Domain validation checks exact depth, position, and root; SQL byte widths are not witness verification. A need's first accepted witness is immutable and one accepted need can fill several distinct ordered slots.
+
+On takeover, load the saved round, ordered targets, and verified witnesses from PostgreSQL. Revalidate against current evidence before using the plan; do not refetch targets or randomness merely because ownership changed. Read them again when needed to establish applicability or to build a different plan.
 
 `action_key` is a versioned digest of the semantic action: kind, dataset, and expected chain boundary (proof context, activation or advancement period boundary, or deletion phase and observed queue suffix for a drain). `expected_state` retains those preconditions and intended effect in a typed encoding; Transaction management retains the exact call. A fresh attempt for the same purpose after a definitive, reconciled outcome increments `attempt_no` under the dataset lock; it is not a fee replacement. The pending-action index guards the local handoff, not chain canonicality. Revised outcomes for resolved actions can block further issue until reconciled. Retain rounds, signed-call identities, and outcomes while required for reorg or execution recovery. Delete old witness bytes only when no recoverable round or retained execution needs them; keep credentials, witness leaves, and branches out of logs and assessment events.
 
@@ -201,6 +206,7 @@ The per-dataset lease is the initial work unit. For a round with $S$ slots and $
 | Two claimers, concurrent wake, or owner loss mid-request | Different live claims, no lost wake, stale owner writes rejected, successor keeps committed witnesses and the original deadline. |
 | Duplicate slots, slow provider, corrupt branch, or quota response | Exact ordered calldata, bounded fan-out, sufficient fallback time, preserved attributable evidence. |
 | First proof before backend AddPieces | An authorized parked Upload SP supplies verified witnesses, including for a large piece after cache restart, before the original cutoff. |
+| Restart after activation, reactivation, or a fork that orphans first activation | A still-applicable activation observation is reused across rounds and reactivation. An invalidated observation cannot select a round or authorize a transition on the new branch. |
 | Null epoch or reorg with unchanged drand seed | Wait for usable chain inputs; reject an obsolete mapping before issue and reconcile an escaped nonce before incompatible work. |
 | Crash after enqueue or broadcast; proof receipt invalidated | Durable request and signed identity recover; same-nonce replacement does not duplicate logical work; revised outcome can reopen schedule reconciliation. |
 | Deletion tail changes, removal batches cross a restart, or deletion receipt reorgs | Only actual receipt IDs update their exact interests. Next period does not wait for the backend release gate, but copies stay protected when removal evidence is stale. |
