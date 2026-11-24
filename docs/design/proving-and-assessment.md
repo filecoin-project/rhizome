@@ -27,7 +27,7 @@ Hash a versioned, unambiguous encoding of the dataset key, sender, listener and 
 
 ## PostgreSQL records
 
-Illustrative migration, using the [shared SQL domains](storage-model.md#acceptance-records). UUIDs are allocated before insertion. FKs are internal to Proving; opaque IDs across modules use owner APIs. The versions are durable record formats, not binaries or branch identities. Both versions of a rolling deployment must continue to claim and recover outstanding formats they support.
+Illustrative migration, using the [shared SQL domains](storage-model.md#acceptance-records). UUIDs are allocated before insertion. FKs are internal to Proving; opaque IDs across modules use owner APIs. Keep the dataset queue schema compatible across overlapping releases. Round and action payloads have their own format versions; enable a new write format only after every worker that can claim those datasets supports it.
 
 ```sql
 CREATE SCHEMA proving;
@@ -37,7 +37,6 @@ CREATE TABLE proving.datasets (
     chain_key text NOT NULL,
     verifier evm_address NOT NULL,
     onchain_dataset_id uint256 NOT NULL,
-    work_version integer NOT NULL CHECK (work_version > 0),
     due_at timestamptz,
     lease_until timestamptz,
     generation bigint NOT NULL DEFAULT 0 CHECK (generation >= 0),
@@ -50,7 +49,7 @@ CREATE TABLE proving.datasets (
     UNIQUE (chain_key, verifier, onchain_dataset_id),
     CHECK (lease_until IS NULL OR due_at IS NOT NULL)
 );
-CREATE INDEX proving_due ON proving.datasets (work_version, claim_at, id)
+CREATE INDEX proving_due ON proving.datasets (claim_at, id)
     WHERE claim_at IS NOT NULL;
 CREATE INDEX proving_by_chain ON proving.datasets (chain_key, id);
 
@@ -145,16 +144,16 @@ Workers poll a shared PostgreSQL queue; no worker is assigned to a dataset while
 Claim only when a worker slot is available, in a short `READ COMMITTED` transaction. For example, a worker that sees a future challenge persists its next wake and releases the lease. When the row becomes due, any instance can claim it. An instance may claim a bounded number by repeating the query below. `SKIP LOCKED` is not a strict fairness or deadline guarantee.
 
 ```sql
--- claim: $1 supported work format, $2 lease interval
+-- claim: $1 lease interval
 WITH candidate AS (
     SELECT id FROM proving.datasets
-    WHERE work_version = $1 AND claim_at <= statement_timestamp()
+    WHERE claim_at <= statement_timestamp()
     ORDER BY claim_at, id
     LIMIT 1 FOR UPDATE SKIP LOCKED
 )
 UPDATE proving.datasets AS d
 SET generation = d.generation + 1,
-    lease_until = clock_timestamp() + $2::interval
+    lease_until = clock_timestamp() + $1::interval
 FROM candidate
 WHERE d.id = candidate.id
 RETURNING d.id, d.generation, d.wake_revision, d.active_round_id, d.lease_until;
@@ -199,6 +198,8 @@ An outstanding incompatible action takes precedence over a new action in all bra
 
 - **Activate / advance:** `nextProvingPeriod` updates the challenge range and must follow queued deletion processing. Use the [FWSS scheduling rules](https://github.com/FilOzone/filecoin-services/blob/352b6146723759bd565b8f0d3606541ea792bc83/service_contracts/src/modules/FWSSProvingModule.sol#L98-L192) and [verifier requirements](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1254-L1288). On first activation the window is relative to the transaction's inclusion epoch, not its planning epoch. Reactivation is aligned to the existing activation epoch. For normal advancement after proof or expiry, follow the listener's current schedule and skipped-period rules. Choose an early challenge epoch legal across the budgeted inclusion epochs: intersect the allowed listener windows and verifier delay bounds, and leave time after the challenge for proof inclusion. If that intersection is empty or the expected inclusion range changes, do not keep sending the old call. Replan from fresh state after resolving any issued request. Empty inactive datasets need no activation. When the last piece is removed from an active dataset, finish the closing transition when legal; the verifier still requires a legal input epoch even when it ends up clearing the scheduled challenge.
 - **Process deletions:** Only after a proof is canonically included, or the active challenge is no longer provable and incompatible submissions are reconciled. A deletion batch clears the challenge. Once the first batch is included, continue draining and advancing on the same safe phase even though `nextChallengeEpoch` is now zero; do not infer a new uninitialized dataset. Select a bounded, gas-fit positive count from `getScheduledRemovals`. [`processPieceDeletions` drains the current tail by count](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1044-L1070), not a list selected by MSP. Recheck the tail before issue. A scheduling transaction can still change the tail before inclusion; correlate and apply only the exact `PiecesRemoved` IDs from the successful receipt. A different valid tail is a result to reconcile, not evidence that the planned IDs were removed. Refresh the queue before dispatching another batch or advancing; a newly queued removal can make an advance revert. Ordinary on-chain advancement does not wait for the [irreversible-action confidence gate](execution-and-integrations.md#chain-confidence-for-irreversible-actions) used for release of backend copies.
+
+Make deletion processing due as soon as the current proof is reconciled or the challenge expires. Drain queued deletions before `nextProvingPeriod`; in steady state, complete both well ahead of the next challenge window. Early dispatch gives time to resolve reverts or fee replacements. It does not prevent replay into the preceding period: after a fork, an escaped deletion can execute on a branch where the proof was orphaned and the old challenge is still valid. The verifier does not check the intended period or proof disposition in `processPieceDeletions`. Whether to require an execution-time guard or accept that residual risk remains a deployment decision.
 
 ### Transaction handoff and recovery
 
