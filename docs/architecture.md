@@ -40,6 +40,7 @@ flowchart TB
         API --> Clients
         API -->|retrieval locations| Storage
         Clients -->|fulfillment requirements| Storage
+        Proofs -->|client membership binding| Clients
         Proofs -->|staged and committed source lookup| Storage
         Clients --> Execution
         Storage --> Execution
@@ -106,7 +107,7 @@ Each signed entry retains its own membership and interest, including repeated Pi
 
 ## Storage-fulfillment state model
 
-Storage management tracks client interests, observed source availability, placements, and external operations separately. A placement links one piece to one SP and, once committed, its backend dataset and piece ID. It is the unit of repair. Client-facing confirmation promotes the provisional interest for each admission entry and keeps that interest's identity.
+Storage management tracks client interests, observed source availability, placements, and external operations separately. A placement links one piece to one SP and, once committed, its backend dataset and piece ID. It is the unit of repair. An admission entry's interest starts at acceptance; ordinary client-facing confirmation changes its membership, not its protection requirement.
 
 Derive protection progress from usable sources, established placements, outstanding additions and removals, and desired protection. Staged data can supply bytes; established placements count toward the protection target. In-flight additions account for planned protection.
 
@@ -136,7 +137,7 @@ Give work restoring a second copy a shorter batching window than work restoring 
 
 ### Stalled pulls and overlapping attempts
 
-A stalled pull can justify a bounded alternative while its outcome is still unknown, especially for sole-copy data. Recheck demand before committing a late pull. Uncommitted staged data can expire; an issued AddPieces operation remains subject to reconciliation.
+Each [pull operation](design/execution-and-integrations.md#provider-pulls) transfers one piece; batch AddPieces commitments, not pulls. A stalled pull can justify a bounded alternative while its outcome is still unknown, especially for sole-copy data. Recheck demand before committing a late pull. Uncommitted staged data can expire; an issued AddPieces operation remains subject to reconciliation.
 
 ## Repair
 
@@ -261,14 +262,14 @@ When available without significant overhead, anchor a grace condition to the con
 ### Addition walkthrough
 
 1. Client service validates/correlates the signed request and its distinct ordered entries, recovers accepted replays, and runs new-admission preflight/source confirmation with Payments context.
-2. One short transaction records admission, applies the provisional interests through Storage management's API, marks those pieces due, and enqueues the client-facing transaction.
+2. One short transaction records admission, applies initial protection demand through Storage management's API, marks those pieces due, and enqueues the client-facing transaction.
 3. Storage management plans only the remaining protection deficit. Transfers and backend commitment proceed alongside client-facing work.
-4. Confirmation promotes the same interest; definitive failure withdraws it. Storage reconciles shared interests and unresolved operations, and exposes specific placement outcomes without Client service mutating placement records.
+4. Client service applies the transaction outcome and any change to Storage demand in one database transaction. Confirmation normally changes only the membership; definitive failure releases that entry's demand. Storage reconciles shared interests and unresolved operations separately.
 5. Payments continues funding and settlement independently. When an operator-approved termination takes effect, run-off begins while issued storage work is reconciled.
 
 ### Interest application and concurrency
 
-Storage management applies initial interest under the piece lock in the acceptance transaction. Later interest changes retain the same entry key and are applied by revision so stale failure or removal cannot clear newer or shared interests. See the [interest protocol](design/storage-model.md#interest-application-and-reconciliation).
+Client service applies initial and later interest changes through Storage's API under the same [piece locks](design/storage-model.md#interest-application-and-reconciliation). The [admission outcome worker](design/storage-workflows.md#durable-discovery) consumes its durable wake in the application transaction without a lease. Placement planning remains separate.
 
 
 ## Retrieval and placement publication

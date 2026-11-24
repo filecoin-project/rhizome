@@ -12,7 +12,7 @@ Storage management targets three suitable PDP placements at distinct SPs and sha
 
 | Fact | Meaning |
 | --- | --- |
-| Client interest | One client-facing relationship requires protection for a piece; acceptance creates provisional interest |
+| Client interest | One client-facing relationship requires protection for a piece; demand starts at acceptance, before chain inclusion |
 | Availability observation | An attributed, timed observation that a source serves the piece |
 | Placement | An intended or established storage relationship at an SP, with its exact backend membership |
 | External operation | A requested effect with stable identity, payload and observed outcome |
@@ -57,14 +57,14 @@ Alice and Bob can share three suitable placements. Alice's withdrawal leaves the
 
 ### Client piece deletion
 
-Client service publishes `deleting` after canonical inclusion of [`PiecesScheduledForRemoval`](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1029-L1040) for the exact membership. The piece can still be challenged. Under the piece lock, Storage management retains all usable committed copies; do not intentionally downsize because an interest is deleting. If there is no continuing, authorized, witness-capable committed copy, plan to establish one. A staged copy can supply witnesses or repair bytes but does not satisfy this requirement. Other active interests still require their normal protection.
+After canonical inclusion of [`PiecesScheduledForRemoval`](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1029-L1040) for an exact membership, Client service changes the interest to `retain_for_proving` in the same transaction that records the scheduling outcome. The piece can still be challenged. Under the piece lock, Storage management retains all usable committed copies; do not intentionally downsize because an interest is deleting. If there is no continuing, authorized, witness-capable committed copy, plan to establish one. A staged copy can supply witnesses or repair bytes but does not satisfy this requirement. Other active interests still require their normal protection.
 
-Proving processes scheduled deletions and supplies the exact [`PiecesRemoved`](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1093-L1110) outcome to Client service. Publish `deleted` only when that membership's removal meets the [irreversible-action confidence gate](execution-and-integrations.md#chain-confidence-for-irreversible-actions). `deleted` contributes no demand. Retain the release evidence with the revisioned interest update and validate its branch before authorizing or issuing removals that depend on it. If a reorg invalidates the removal or its confidence, republish `deleting` if the schedule still applies, or `confirmed` if it no longer does and the membership remains live. Preserve the removal intent for reconciliation. Never apply an old outcome to a re-added membership.
+Proving processes scheduled deletions and supplies the exact [`PiecesRemoved`](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1093-L1110) outcome to Client service. Transition to `released` only when that membership's removal meets the [irreversible-action confidence gate](execution-and-integrations.md#chain-confidence-for-irreversible-actions). Retain the release evidence on the interest and validate its branch before authorizing or issuing removals that depend on it. If a reorg invalidates the removal or its confidence, restore `retain_for_proving` if the schedule still applies, or `protect` if it no longer does and the membership remains live. Restore demand in the transaction that applies the correction. Preserve the removal intent for reconciliation. Never apply an old outcome to a re-added membership.
 
 ## Invariants and atomicity
 
-1. **One entry, one continuing interest:** acceptance applies provisional interest atomically; confirmation promotes the same interest.
-2. **Relationship-scoped updates:** apply each withdrawal to its source entry and revision, preserving other entries and newer admissions.
+1. **One entry, one continuing interest:** acceptance applies demand atomically; ordinary confirmation does not rewrite the interest.
+2. **Relationship-scoped changes:** apply withdrawals and restorations only to the original entry, using the exact inclusion binding when membership evidence is involved.
 3. **Shared retention:** a placement required by any continuing compatible interest cannot be authorized for removal as though unneeded.
 4. **Serialized planning decisions:** each committed plan accounts for interests, placements, and outstanding work within its consistency scope. Two transactions cannot both publish additions based on the same stale deficit.
 5. **Removal orders against demand:** removal authorization checks current locally applied demand and records outgoing state plus the exact removal operation atomically under the same consistency protocol as demand changes.
@@ -89,7 +89,7 @@ Use one stable coordination row per PieceCID within the MSP's storage scope. All
 
 1. Start a short PostgreSQL transaction at `READ COMMITTED` and ensure the canonical coordination row exists through a uniqueness-protected creation path. Concurrent first admissions must converge on that same row.
 2. Acquire its row lock before reading mutable decision inputs.
-3. After acquiring the lock, read current applied interests, placements, operation/batch state, and delivery revisions. After waiting, see the predecessor's committed changes rather than a stale pre-lock snapshot.
+3. After acquiring the lock, read current interests, placements, and operation/batch state. After waiting, see the predecessor's committed changes rather than a stale pre-lock snapshot.
 4. Apply the domain change and publish durable follow-on work atomically. Preserve stable external operation identities and the exact immutable payload of issued work.
 5. Commit, releasing the lock. Execute external I/O only from durable intent after that transaction.
 
@@ -97,13 +97,20 @@ All planning-fact mutations follow this protocol: interest application, placemen
 
 When a fact change does not plan immediately, it leaves the piece's due marker set in the same transaction. The planner later acquires the same row and reads current inputs.
 
-Retain coordination rows while interests, placements, pending updates, unresolved operations or reconciliation refer to them. Creation and any later cleanup preserve one serialization point under concurrent access.
+Retain coordination rows while interests, placements, unresolved operations or reconciliation refer to them. Creation and any later cleanup preserve one serialization point under concurrent access.
 
 ### Multi-piece batches and lock order
 
 Batch discovery reads candidate ready placements. A bounded freezing transaction takes distinct piece locks in canonical order, rechecks need/readiness and absence of a prior frozen entry, then validates that the destination dataset is open for additions and its on-chain ID matches its finalized creation result. Persist the exact ordered entries atomically, preserving every signed entry and interest.
 
-For chain-applicability checks, first acquire a shared lock (`FOR SHARE`) on the chain's `chain.reconciliation_basis` row. Its branch token identifies the observed canonical branch. Then acquire storage locks in order: piece rows sorted by `(managed_scope, piece_cid)` bytes; destination slots/datasets by ID; FWSS nonce claims by `(chain_key, fwss, payer, nonce)`; then placement, batch and operation rows by ID. Admission acceptance also takes distinct piece locks before claiming FWSS nonces. Take separate scheduling locks last under the [work coordination contract](execution-and-integrations.md#durable-work-coordination).
+For paths that combine these locks, use this order:
+
+1. Shared `chain.reconciliation_basis` row (`FOR SHARE`) if validating chain applicability; then Client admission rows in ID order if the transaction changes Client records.
+2. Distinct piece rows sorted by `(managed_scope, piece_cid)` bytes, then destination slots/datasets by ID.
+3. FWSS nonce claims by `(chain_key, fwss, payer, nonce)`, then placement, batch and operation rows by ID. Take Transaction management request locks after the piece locks on paths that use both.
+4. Separate scheduling rows last, under the [work coordination contract](execution-and-integrations.md#durable-work-coordination).
+
+Acquire all affected piece locks before applying a multi-piece change. A caller that learns it needs another piece key after taking later locks rolls back and retries with the full key set. Storage paths do not acquire Client admission locks after taking piece locks.
 
 Apply batch outcomes under the affected piece locks, recording the outcome and exact placement changes together. Fetch receipt/nonce evidence before entering the transaction, then validate its applicability during application.
 
@@ -131,7 +138,7 @@ SQL schemas identify module ownership. Local IDs are UUIDs and local revisions a
 
 `tx.fwss_nonce_claims` assigns each `(chain, FWSS contract, payer, nonce)` to a module's logical operation and authorization digest. Transaction management owns the table; Client service and Storage management insert claims through its API. Creation and addition share this key space. Insert claims in key order and commit them with the operation.
 
-Owner APIs validate authorization bindings, complete nonce claims, contiguous entry indexes and an applied provisional interest per entry before commit.
+Owner APIs validate authorization bindings, complete nonce claims, contiguous entry indexes and an applied interest per entry before commit.
 
 Client service owns preflight upload records. Retain the stable MSP upload ID, authenticated client and client-scoped idempotency key, immutable constraints, chosen SP and endpoint binding, and creation deadline. Retain enough to replay the original preflight without extending that deadline. This record authorizes staging and identifies the provider; it is not an admission, a nonce claim, or evidence of uploaded bytes.
 
@@ -196,19 +203,23 @@ CREATE TABLE client.entries (
     piece_cid bytea NOT NULL CHECK (octet_length(piece_cid) > 0),
     managed_scope uuid NOT NULL,
     source_sp uuid NOT NULL,
-    source_revision bigint NOT NULL DEFAULT 1 CHECK (source_revision > 0),
     service_requested boolean NOT NULL DEFAULT true,
-    source_state text NOT NULL
-        CHECK (source_state IN ('provisional', 'confirmed', 'deleting', 'deleted', 'withdrawn')),
     PRIMARY KEY (admission_id, entry_index)
 );
+
+CREATE TABLE client.admission_work (
+    admission_id uuid PRIMARY KEY REFERENCES client.admissions(id),
+    due_at timestamptz
+);
+CREATE INDEX client_admission_due ON client.admission_work (due_at, admission_id)
+    WHERE due_at IS NOT NULL;
 ```
 
 `bound_request` preserves the complete typed envelope: EIP-712 domain, authorization digests, signed fields and metadata representation, dataset route or creation variant/terms, and call semantics. Preserve signed array order and use consistent scalar/binary encodings. Equivalent transport encodings and separately valid equivalent signatures compare equal on replay; execution retains the first accepted authorization and call.
 
 Entries retain their PieceCID and selected SP. `admission_evidence` associates each ordered entry with its MSP upload ID for routing and retains [parked-source evidence](execution-and-integrations.md#parked-source-evidence) by `(source_sp, piece_cid)`, including trusted endpoint/version, observation time, and guaranteed deadline. Share evidence for the same source and PieceCID. Decode raw size from the signed v2 CID. Transport upload IDs do not prove provenance or change the signed authorization or accepted admission identity.
 
-`source_revision` orders the interest updates Client service publishes for an entry; `source_state` holds its published interest state. `service_requested` records the client's continuing service intent, not the current retention requirement. Acceptance sets it true; explicit withdrawal clears it. A chain-derived admission failure can publish `withdrawn` while preserving the intent for reorg recovery. For an on-chain removal use the [deletion states](#client-piece-deletion), not `withdrawn`. Request cancellation preserves accepted intent.
+`service_requested` records the client's continuing service intent, not its current retention requirement. Acceptance sets it true; explicit withdrawal clears it. A chain-derived admission failure can release Storage demand while preserving service intent for reorg recovery. An on-chain removal follows the [deletion rules](#client-piece-deletion), not the explicit-withdrawal path. Request cancellation preserves accepted intent.
 
 ### Execution and inclusion records
 
@@ -222,7 +233,7 @@ Record keys and fields follow. Use foreign keys within a module and owner APIs f
 | `tx.attempts` / Transaction management | PK `(request_id, attempt_number)`; request-scoped assignment FK, `UNIQUE(chain_key, tx_hash)`, signed bytes and broadcast/reconciliation state. Number persisted signed transactions from 1; the first hash is the original response alias, and every retained hash resolves to its request. |
 | `tx.receipts` / Transaction management | Key `(chain_key, tx_hash, immutable_block_ref)`; correlated receipt/log evidence and optional local-attempt link. Supports MSP submissions, externally recovered execution and conflicting nonce consumption. Retain evidence needed by replay or effects. |
 | `chain.reconciliation_basis` / Shared chain access | PK `chain_key`; observed branch token. It changes on a known fork and remains stable through ordinary head advances. Publication and outcome reads hold a shared row lock while validating it. |
-| `client.admission_work` / Client service | PK/FK by admission ID; [leased wake state](execution-and-integrations.md#claims-and-concurrent-wakes). Register with the admission so Transaction management can wake it without taking the admission lock. |
+| `client.admission_work` / Client service | PK/FK by admission ID; indexed `due_at` only. Register it with the admission so Transaction management can wake it without taking the admission lock. See [lease-free outcome application](storage-workflows.md#durable-discovery). |
 | `client.inclusions` / Client service | PK `(admission_id, inclusion_revision)`; verifier, dataset, first assigned piece ID, entry count and receipt reference. Admission-scoped FK from `admissions.current_inclusion_revision`. |
 | `client.memberships` / Client service | Current reverse lookup: PK `(chain_key, verifier, data_set_id, piece_id)`; `UNIQUE(admission_id, entry_index)`; entry and inclusion FKs. Retire invalidated mappings before installing replacements. Derive historical ordered IDs from validated first-ID/count and immutable entries. |
 | `client.removals` / Client service | Resolved `(admission_id, entry_index, inclusion_revision)`, exact chain/verifier/dataset/piece target, and immutable authorization/observation reference. Persist before handoff or issue; apply scheduling and processing outcomes to that binding. Retain the evidence used to release demand. |
@@ -242,12 +253,11 @@ Apply the [recovery principles](../engineering/principles.md#failure-must-not-cr
 
 ### Interest application and reconciliation
 
-Client service owns admission entries. Storage management applies the initial snapshot for every entry, including its source attribution, in the acceptance transaction. Client service publishes later revisions through `Storage.EnqueueInterest` in the transaction that changes the entry. The inbox carries mutable membership context and release evidence so the piece-locked Storage consumer need not acquire Client service's domain locks.
+Client service owns admission entries and client-facing membership bindings. Apply initial demand and later retention changes through Storage's API in the transaction that records the corresponding Client decision. The caller holds the admission lock and validates the current outcome or exact removal evidence; Storage writes only its own interest records under the piece locks. There is no intermediate interest inbox or delivery revision.
 
-| Record / owner | Required fields and constraints |
-| --- | --- |
-| `storage.interest_updates` / Storage management | PK `(admission_id, entry_index)`; latest post-acceptance revision, complete mutable source state/membership context and applicable release evidence, scope/CID lock key, payload version and due time. Upsert only a higher revision; same revision/different payload is a contract violation. |
-| `storage.interests` / Storage management | PK `(admission_id, entry_index)`; immutable scope/CID and initial source attribution, applied revision, state and membership context, and applicable release evidence. Index by piece. Retain withdrawn/deleted state and revision to reject delayed updates. |
+`storage.interests` is keyed by `(admission_id, entry_index)` and indexed by piece. Retain immutable scope/CID and initial source attribution. Record only the retention requirement: `protect` for normal protection before or after confirmation; `retain_for_proving` for a deleting membership under the [deletion rules](#client-piece-deletion); or `released` for no demand. Retain applicable release evidence and its exact membership binding when release depends on on-chain deletion. Client service owns the membership lookup; routine confirmation does not update Storage.
+
+If retention or the evidence Storage needs changes, make the piece due in the same transaction. Applying the same decision again leaves the interest unchanged. A stale outcome cannot change demand: check the current branch and outcome or exact removal binding before calling Storage, rather than ordering forwarded snapshots.
 
 `storage.pieces.plan_after` schedules per-piece reconciliation:
 
@@ -265,8 +275,6 @@ CREATE INDEX pieces_due ON storage.pieces
 
 Under the piece lock, a planning-fact change makes `plan_after` due, preserving any earlier due time. A worker claims the due piece by taking that row lock, for example with `FOR UPDATE SKIP LOCKED`. After acquiring it, read current facts, publish only the remaining deficit, and clear or reschedule `plan_after` in the same transaction. There is no separate job or lease. A later writer takes the same lock and makes the piece due again.
 
-Enqueue coalesces later snapshots into one pending row per entry. Application locks the piece, then reads the locked pending row's latest snapshot. Apply a higher revision and make planning due, or discard a stale/equal revision; atomically delete the consumed pending row. A concurrent producer updates before the locked read or inserts after deletion commits. Initial source attribution remains on the applied interest.
-
 ### Initial protection records
 
 Storage management records placement work, transfers, fixed commitment batches and exact backend memberships:
@@ -275,7 +283,7 @@ Storage management records placement work, transfers, fixed commitment batches a
 | --- | --- |
 | `dataset_slots` and `datasets` | Slot PK `(managed_scope, sp_id)` selects the open backend dataset. Persist standalone creation intent and its nonce claim before signing. A dataset accepts batches only once its on-chain ID and creation meet the required finality. |
 | `placements` | `id` PK; original piece scope/CID FK, destination SP/dataset, lifecycle and current backend membership. Derive typed direct representation from the stored key. Index by piece/destination; allow multiple placements of a piece at one SP. Each frozen authorization has its own placement IDs. |
-| `transfers` | `id` PK; placement FK, source/endpoint, destination, exact versioned pull parameters, provider replay scope/correlation, issue/outcome and due fields. Persist before issue. JWT renewal changes credentials, not transfer identity. A successful item supplies staged availability. |
+| `transfers` | `id` PK; one piece via its placement FK, source/endpoint, destination, exact versioned pull parameters, provider replay scope/correlation, issue/outcome and due fields. Persist before issue. JWT renewal changes credentials, not transfer identity. Success supplies the exact staged source and retention deadline. |
 | `batches` | `id` PK; destination/dataset, immutable unsigned ordered payload/digests and FWSS nonce claims, `frozen_at`, nullable signed authorization/exact provider request, observation and due fields. Persist signed bytes plus submission work before issue; once populated they are immutable. Each placement's first commitment deadline is retained across discovery/failover. |
 | `batch_entries` | PK `(batch_id, entry_index)`; placement FK and CID; `UNIQUE(placement_id)` and `UNIQUE(batch_id, piece_cid)`. Entries assign placements to frozen batches. Retry the same batch/authorization; alternatives use new placements and can reuse parked bytes. |
 | `staged_sources` | Source bound to scope and PieceCID: the selected provider and PieceCID from admission, or the exact provider staging reference from a successful pull. Retain the known retention deadline, refresh due time, and requested deadline for an unresolved refresh. Publish renewed deadlines under the piece lock; provider calls run outside it. |

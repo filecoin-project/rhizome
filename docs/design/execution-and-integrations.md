@@ -8,7 +8,7 @@ Reconcile by a stable domain key. A wake means that the worker should read curre
 
 | Work | Transaction boundary |
 | --- | --- |
-| Local domain change | Call the owning module's transaction-aware API directly when the changes belong in one commit. When a due marker is on the domain row and the decision fits under its lock, read current facts, commit the decision and follow-on work, and clear or reschedule the marker in one short transaction. No lease. |
+| Local domain change | Call the owning module's transaction-aware API directly when the changes belong in one commit. For SQL-only work, read current facts under the domain locks and commit the decision, follow-on work, and wake consumption or rescheduling together. If the due marker is separate, discover without locking it and take its lock last. No lease. |
 | Reconciliation across I/O | Claim only when a worker slot is available. Read external evidence outside SQL, then recheck ownership and the applicable domain inputs before committing. Repeat cheap reads on takeover; checkpoint results needed for correctness or deadlines. Persist a next wake instead of holding a worker or lease while waiting for a receipt, retry time, or epoch. |
 | External mutation | Record a stable intent and its exact parameters before issue. The executor advances that intent, records attributed outcomes, and makes the domain due. If an effect may have escaped, recover the outcome or replay the same operation where the integration supports it. A missing response is not permission to create a replacement. |
 
@@ -74,7 +74,7 @@ Each accepted ordered entry is identified by:
 
 `(logical request identity, zero-based entry index)`
 
-Client service retains this identity before on-chain piece IDs exist. Storage management uses it for the entry's provisional interest, all later revisions, and promotion of that same interest.
+Client service retains this identity before on-chain piece IDs exist. Storage management uses it to record interest at acceptance and to apply later changes to that same interest.
 
 After confirmation, retain the entry's association with `(chain, PDP verifier, on-chain client-facing dataset ID, assigned piece ID)` so membership removal can withdraw the correct interest.
 
@@ -82,11 +82,9 @@ A fresh nonce creates a distinct addition even for the same PieceCID and dataset
 
 Curio rejects duplicate subpieces in one HTTP addition. MSP submits the client-facing call through Transaction management and applies Curio's rule to backend batches. Reuse compatible placements, and put any required distinct placements of the same piece at one SP in separate compatible batches. Keep the signed client request, entry outcomes, memberships, and payment semantics intact.
 
-### Interest revisions
+### Interest application
 
-Acceptance applies the initial interest in the same transaction. Each entry's source revision orders later updates for that entry only. Applying a later snapshot, recording its revision, and making the piece due is atomic at Storage management's boundary.
-
-Use the same key for provisional acceptance, confirmation, definitive failure, and later removal. A failure or removal applies only to its own entry identity. Use the model's piece coordination rows to serialize competing placement decisions.
+Apply interest changes under the [piece-locked transaction contract](storage-model.md#interest-application-and-reconciliation). Ordinary confirmation leaves protection unchanged. Failure or removal applies only to its original entry and, for membership-specific evidence, its exact inclusion.
 
 ## Replay behavior
 
@@ -161,7 +159,7 @@ A zero outcome establishes only that the nonce has no successful consumption in 
 
 ## Combined dataset creation and addition
 
-The SDK's first commit can create a dataset and add its first pieces through `POST /pdp/data-sets/create-and-add`. Persist both signed authorizations, the complete ordered body, both FWSS nonce claims, the transaction request, and the applied provisional interests atomically. Creation claims the `clientDataSetId`; addition claims the nonce. Both use the same payer/FWSS namespace and must be distinct.
+The SDK's first commit can create a dataset and add its first pieces through `POST /pdp/data-sets/create-and-add`. Persist both signed authorizations, the complete ordered body, both FWSS nonce claims, the transaction request, and initial protection demand atomically. Creation claims the `clientDataSetId`; addition claims the nonce. Both use the same payer/FWSS namespace and must be distinct.
 
 Until the transaction succeeds, identify each entry by the accepted request and its index. On success, attach the on-chain dataset and piece IDs to those entries. The verifier creates the dataset and appends pieces in a single transaction; a revert rolls back both actions.
 
@@ -205,7 +203,7 @@ If initial HEAD does not confirm the source, reject or defer before durable acce
 
 ### Parking refresh and retention
 
-Curio must provide an authenticated MSP-to-SP retention guarantee that serializes with staging cleanup. For a direct-upload source, identify a readable copy by PieceCID at the selected provider, independent of any tus upload or result. For a pull, use the exact staging reference from the successful pull item and its expected PieceCID. Send an absolute retention deadline; the provider returns its effective guaranteed deadline only after committing the protection. Replaying the same request must not allocate another copy or move the deadline further. If the source cannot be protected, report failure rather than a guarantee. This does not protect against SP or disk failure.
+Curio must provide an authenticated MSP-to-SP retention guarantee that serializes with staging cleanup. For a direct-upload source, identify a readable copy by PieceCID at the selected provider, independent of any tus upload or result. For a pull, use the exact staging reference from the successful operation and its expected PieceCID. Send an absolute retention deadline; the provider returns its effective guaranteed deadline only after committing the protection. Replaying the same request must not allocate another copy or move the deadline further. If the source cannot be protected, report failure rather than a guarantee. This does not protect against SP or disk failure.
 
 Before acceptance, establish enough remaining retention for each selected source to cover handoff, queueing, transfers, proving while relying on the staged copy, commitment, and recovery; refresh if needed. If there is not enough proven time after accounting for observation age and clock uncertainty, defer or reject rather than accepting on HEAD alone. Persist the source key, evidence attribution and time, and guaranteed deadline with the admission. Storage management schedules refreshes while accepted work relies on that source, including for pulled staging. A failed or uncertain refresh cannot advance the known deadline. If availability can no longer be relied on, replan from other sources without withdrawing demand.
 
@@ -217,9 +215,9 @@ For each selected Upload SP and signed PieceCID, require positive `witnessReady`
 
 ## Provider pulls
 
-MSP authorizes the destination SP's pull through the same MSP JWT trust and verification contract as tus uploads. Issue a pull-scoped token for the destination, not a forwarded client upload grant. Bind the stable transfer ID and exact pull parameters, including the expected PieceCID(s), source URL(s), and any byte limits, directly or through a request digest. Reissue expired credentials without changing the transfer ID or parameters. The pull authorizes staging, not a PDP membership, and does not require an FWSS signature or a frozen AddPieces batch. The subsequent commitment keeps its own authorization and nonce.
+One pull operation transfers one piece from one source to one destination SP. MSP authorizes it through the same JWT trust and verification contract as tus uploads. Issue a pull-scoped token for the destination, not a forwarded client upload grant. Bind the stable transfer ID and exact parameters, including the expected PieceCID, source URL, and any byte limit, directly or through a request digest. Reissue expired credentials without changing the transfer ID or parameters. The pull stages bytes without an FWSS signature or frozen batch; subsequent AddPieces commitments are batched separately.
 
-Curio must recover pull status by stable transfer ID scoped to the MSP issuer and destination service. Repeating the same parameters returns the existing operation; different parameters conflict. Apply success to each matching item, not from aggregate status, and return the exact staging reference and retention deadline for each parked piece. Use a new transfer identity for materially changed work. The pinned Curio pull handler keys work by service, signed `extraData` hash, dataset ID, and record keeper, and simulates AddPieces before creating new work. MSP transfer identity and authorization independent of AddPieces remain Curio integration dependencies.
+Curio must recover pull status by stable transfer ID scoped to the MSP issuer and destination service. Repeating the same parameters returns the existing operation; different parameters conflict. Success returns the matching PieceCID, exact staging reference, and retention deadline. Use a new transfer identity for materially changed work. The pinned Curio pull handler keys work by service, signed `extraData` hash, dataset ID, and record keeper, and simulates AddPieces before creating new work. MSP transfer identity and authorization independent of AddPieces remain Curio integration dependencies.
 
 Destination SPs must be able to fetch and verify the piece from the configured HTTPS source within their network and URL policies. The JWT authorizes the pull request at the destination, not the source GET. Initially use the existing public retrieval GET. Curio supports forwarding a Keysmith FOC-Grant for a restricted source; MSP still needs a separate scoped read contract to use it.
 

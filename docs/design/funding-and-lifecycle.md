@@ -44,7 +44,7 @@ These values describe the observed account rather than reserved capacity for a p
 
 | Condition | Before durable acceptance | After durable acceptance |
 | --- | --- | --- |
-| Exact preflight establishes a client funding/allowance failure | Reject through the normal API error path without creating an interest, accepted nonce claim, or client-facing operation. | Reconcile issued attempts. A conclusive admission failure withdraws only that admission's interests through the revision protocol. |
+| Exact preflight establishes a client funding/allowance failure | Reject through the normal API error path without creating an interest, accepted nonce claim, or client-facing operation. | Reconcile issued attempts. A conclusive admission failure releases only that admission's interests in the [outcome application transaction](storage-workflows.md#inclusion-and-reorgs). |
 | Required client preflight is unavailable or cannot be interpreted reliably | Reject or defer for an unknown dependency result; do not classify it as confirmed client underfunding. | Preserve accepted intent and reconcile when the dependency returns. |
 | Exact client preflight succeeds | Client funding eligibility passes. Apply the known-shortfall gates below using available information. | Reconcile actual execution and reorg outcomes under the durable request identity; preflight reserves no funding. |
 | Original accepted request is replayed | Recover the admission before fresh-admission gates. | Return or recover its retained status and reuse its transactions and interests. |

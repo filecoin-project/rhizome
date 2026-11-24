@@ -30,7 +30,7 @@ sequenceDiagram
     C->>CS: Signed client-facing AddPieces with upload ID
     CS->>A: Check retrieval HEAD, retention, and witness readiness
     Note over CS: Validate request, funding context, admission eligibility
-    CS->>SM: Apply provisional interests and mark pieces due
+    CS->>SM: Record interests and mark pieces due
     Note over CS,SM: Same transaction as admission and client-facing transaction intent
     Note over SM: Plan the remaining deficit under the piece lock
     par Client-facing commitment
@@ -40,9 +40,9 @@ sequenceDiagram
         alt Client-facing inclusion
             Chain-->>C: Successful receipt and assigned IDs
             Note over C: SDK storage success
-            CS->>SM: Publish promotion of the same interest
+            Note over CS: Install membership; normal protection is unchanged
         else Definitive admission failure
-            CS->>SM: Durable withdrawal of this interest
+            CS->>SM: Release affected demand in the outcome transaction
         else Outcome still unknown
             Note over CS,TM: Retain operation and reconcile without withdrawing interest
         end
@@ -78,7 +78,7 @@ An accepted replay bypasses new-admission gates. A fresh nonce is a new admissio
 In one short PostgreSQL transaction, Client service:
 
 1. Records the validated request, exact authorization/call, and stable ordered entry identities.
-2. Applies each entry's provisional interest through Storage management's API under the ordered piece locks. Marks each affected piece due without planning.
+2. Records normal protection demand for each entry through Storage management's API under the ordered piece locks. Marks each affected piece due without planning.
 3. Claims the FWSS nonces and enqueues the client-facing transaction with the admission's outcome wake key.
 
 Each module writes its own records through an API using the shared local transaction. Commit before signing, RPC or provider calls.
@@ -93,7 +93,7 @@ In the running scenario, A needs backend commitment while B and C need transfers
 
 ### 5. Run transfers and form commitments
 
-Persist the transfer identity and exact request before issue. Authorize staging with the [MSP pull JWT](execution-and-integrations.md#provider-pulls) and recover the same operation after a lost response. Use each successful pull item's staging reference and deadline for commitment and refresh scheduling; a staged source can also supply witnesses without counting as a committed placement.
+Persist each transfer's stable identity, exact request, and destination placement before issue. Authorize staging with the [MSP pull JWT](execution-and-integrations.md#provider-pulls) and recover the same operation after a lost response. The pull transfers one piece, and success supplies its staging reference and retention deadline for commitment and refresh scheduling. A staged source can also supply witnesses without counting as a committed placement.
 
 Batch independently ready placements by destination and urgency. Before freezing a batch, acquire affected piece locks in canonical order, recheck need and readiness, and require a destination dataset with finalized creation. Atomically persist destination, ordered entries, exact payload, stable FWSS client nonce, and placement assignments. Follow the model's lock hierarchy for destination/operation records. Sign and submit after the transaction. Once authorization may have escaped, its payload and memberships remain immutable.
 
@@ -101,7 +101,7 @@ The SP submits backend AddPieces. Recover through its persisted authorization, c
 
 ### 6. Apply client-facing outcomes
 
-Client service reads the current applicable outcome, correlates inclusion and membership assignments, publishes continuing interests, and makes Payments discovery due through the [application protocol](#inclusion-and-reorgs). Storage management promotes entries whose service remains requested.
+Client service reads the current applicable outcome, correlates inclusion and membership assignments, and makes Payments discovery due through the [application protocol](#inclusion-and-reorgs). Apply any change to retention demand or release evidence through Storage's API in the same transaction. Normal confirmation updates Client membership and can wake Proving without changing Storage demand.
 
 The SDK succeeds when the client-facing transaction is included successfully. A definitive failure withdraws the affected interests; an orphaned failure restores retained service intent. The [inclusion/reorg contract](execution-and-integrations.md#addpieces-inclusion-and-reorgs) defines confirmation and the [response contract](execution-and-integrations.md#transaction-hash-response-contract) defines hash waiting and replay.
 
@@ -122,12 +122,12 @@ Allocate admission and transaction-request IDs before acceptance writes. This al
 | `Transactions.ClaimFWSS(tx, owner, claims)` | Insert sorted [FWSS nonce claims](storage-model.md#acceptance-records) for the operation. Return the existing owner on collision; the caller compares the complete authorization. |
 | `Transactions.Enqueue(tx, requestID, callerKey, exactCall, wakeKey)` | Persist or recover the request by caller module/operation. Verify request ID, sender, chain, target, value, calldata and caller wake key; return the retained request ID. |
 | `Transactions.ReadOutcome(tx, requestID)` | Acquire shared reconciliation-basis and request locks in that order. Read the current outcome and validate its saved branch token; return the outcome or `revalidation_required`. |
-| `Storage.ApplyInitialInterests(tx, snapshots)` | Under sorted, distinct piece locks, apply one provisional snapshot per accepted entry and make each piece due. No inbox or placement planning on this path. |
-| `Storage.EnqueueInterest(tx, sourceSnapshot)` | Coalesce the highest post-acceptance revision per entry. The piece-locked consumer applies it without locking the Client entry. |
+| `Storage.LockPieces(tx, keys)` | Take distinct piece locks in canonical order, ensuring coordination rows exist. Call before taking nonce or transaction request locks on paths that use both. |
+| `Storage.ApplyInterests(tx, changes)` | With the affected piece locks already held, apply validated entry-scoped retention changes and make changed pieces due. Acceptance includes immutable source attribution. No inbox or inline planning. |
 | `Payments.RequestReconcile(tx, datasetKey)` | Make the coalesced dataset key due for Payments to discover and refresh its account/rail observations. |
 | `Client.ReadProgress(originalHash or admissionID)` | Recover the operation's current chain facts and ordered results through owner APIs. |
 
-For acceptance, Client service records the admission, takes sorted piece locks through Storage's API, then claims FWSS nonces and enqueues the request. For outcome application it locks the admission before reading the branch-validated request, and enqueues subsequent interest snapshots in entry order. Storage consumers acquire piece locks before locking their interest inbox rows. Transaction management follows its branch/account/request lock order. Register, wake, and finish separate scheduling rows last under the [shared work contract](execution-and-integrations.md#durable-work-coordination).
+Follow the [shared lock order](storage-model.md#multi-piece-batches-and-lock-order). Acceptance records the admission and entries, then takes piece locks before claiming FWSS nonces and enqueuing the request. Chain-derived application takes the shared branch lock and the Client admission lock first, determines the potentially affected piece keys from the locked admission and its entries, and takes their sorted locks before reading the locked request. Take separate scheduling locks last. Evaluate Client and Storage changes only from validated current facts.
 
 ### Acceptance and concurrent replay
 
@@ -137,11 +137,11 @@ For acceptance, Client service records the admission, takes sorted piece locks t
 4. On uniqueness conflict, roll back the complete transaction. Load the winning operation in a fresh transaction and compare its bound request. Recover an equivalent operation or return a conflict for different semantics/ownership.
 5. After commit, wait for persisted signed bytes/hash and submission work, then return `201` with the original hash in `Location`. Workers discover accepted work independently of the HTTP connection.
 
-Before commit, verify ordered indexes `0..N-1`, one applied provisional interest per signed occurrence, the source binding and valid parked-source evidence for each entry, nonce roles/digests, and the returned transaction ID.
+Before commit, verify ordered indexes `0..N-1`, one interest with normal protection demand per signed occurrence, the source binding and valid parked-source evidence for each entry, nonce roles/digests, and the returned transaction ID.
 
 ### Interest application and placement planning
 
-For later interest snapshots, apply the [piece-locked inbox protocol](storage-model.md#interest-application-and-reconciliation). Applying the snapshot and making the piece due commit together.
+Apply initial demand and later changes through the [same piece-locked protocol](storage-model.md#interest-application-and-reconciliation). When demand changes, the Client decision, Storage interest, and piece due marker commit together. Membership-only changes do not rewrite the interest.
 
 Freeze batches under the [ordered locks](storage-model.md#multi-piece-batches-and-lock-order). Recheck need, the destination dataset's finalized creation and accepting state, and placement assignment. Persist payload, nonce claims and ordered entries atomically. Sign after commit and persist signed authorization, provider request and submission work before issue. Retry the saved request; alternative authorizations use new placements and may reuse staged data.
 
@@ -152,16 +152,16 @@ Provision backend datasets separately from AddPieces. Under the destination lock
 | Transition | Atomic local changes and recovery |
 | --- | --- |
 | Publish transaction observation | Capture operation revision, ownership and branch token before external reads. Lock and recheck at publication. [Publish the current outcome and wake the admission](execution-and-integrations.md#transaction-outcome-publication); carry the established inclusion revision until its binding changes. |
-| Retire a superseded binding | Validate that the current outcome supersedes the local inclusion. In its own transaction, clear those mappings/pointer, publish provisional interest where service is requested, and request Payments reconciliation. Leave the admission due without advancing its applied revision. |
-| Install current inclusion | Lock admission and validate the current outcome. Insert inclusion/mappings; derive interest from outcome and `service_requested`. Enqueue changed updates and Payments reconciliation, then record the applied revision in the same commit. A mapping conflict leaves installation due after the committed retirement. |
-| Apply without installing | Apply a validated unresolved/failed outcome or update to the installed inclusion and record its applied revision. For `revalidation_required`, apply nothing; Transaction management wakes the admission when the outcome is applicable again. |
-| Correct a reorg or failure | Retire superseded inclusion and membership mappings first. Re-inclusion uses a new inclusion revision. A definitive failure withdraws published interest while preserving service intent; if orphaned, restore interest where service remains requested. Reconcile the original authorization under its retained client nonce. |
+| Retire a superseded binding | Validate that the current outcome supersedes the local inclusion. In its own transaction, clear those mappings and the pointer. Restore normal protection where service is still requested and the old binding no longer justifies reduced demand. Wake Proving for the retired binding and make Payments discovery due. Leave the admission due without advancing its applied revision. |
+| Install current inclusion | Validate the current outcome under the ordered locks. Insert inclusion and membership mappings; change Storage demand only if necessary. Wake Proving if the binding changed, make Payments discovery due, and record the applied revision in the same commit. A mapping conflict rolls back installation, leaving it due after the committed retirement. |
+| Apply without installing | Apply a validated unresolved/failed outcome or a change to evidence for the installed inclusion. Write any corresponding interest changes and the applied revision atomically. For `revalidation_required`, apply nothing; Transaction management wakes the admission when the outcome is applicable again. |
+| Correct a reorg or failure | Retire superseded inclusion and membership mappings first. Re-inclusion uses a new inclusion revision. A definitive failure releases the affected interests while preserving service intent; if orphaned, restore normal protection where service remains requested. Reconcile the original authorization under its retained client nonce. |
 
 The [inclusion revision](storage-model.md#execution-and-inclusion-records) identifies the successful inclusion being applied. It remains stable through evidence updates and changes after invalidation/restoration. Reconciliation continues after SDK success.
 
 If a fork swaps A's and B's assigned IDs, retire each old mapping in a committed transaction before installing replacements. An installation conflict then leaves the old blocker retired. Backend membership application uses the same sequence under ordered piece locks.
 
-For admission outcomes, explicitly withdrawn entries remain withdrawn; otherwise terminal failure withdraws interest, installed inclusion confirms it and validated unresolved/retired state is provisional. An exact membership under [client piece deletion](storage-model.md#client-piece-deletion) follows the deletion states, not the ordinary admission rule. Increment the source revision when its snapshot changes; Payments receives reconciliation keys.
+For admission outcomes, explicitly withdrawn entries remain released. Otherwise, terminal failure releases demand; installed inclusion and validated unresolved or retired state require normal protection unless the exact membership follows the [client piece deletion rules](storage-model.md#client-piece-deletion). Do not carry a deletion decision over to a new inclusion. Client service owns membership lookup and uses exact inclusion bindings when applying deletion or correcting a reorg.
 
 Resolve removals to entry/placement, inclusion and exact external target at the authorization/observation view. Persist this binding before handoff, revalidate before issue/retry and apply later results to the recorded relationship. Reconcile escaped effects against their actual chain context.
 
@@ -169,7 +169,13 @@ An ordinary creation reorg affects only a non-accepting backend dataset; no batc
 
 ### Durable discovery
 
-Bounded due scans cover unresolved effects and admissions awaiting application. Claim the admission wake separately, then fence and finish it with the application transaction. An unfinished application, including a replacement mapping blocked by a conflict, explicitly leaves the admission due. Stale branch tokens select resolved success/revert/conflict for revalidation. Lifecycle/funding checks follow their freshness schedules; accepted work recovers independently of HTTP waiters.
+Transaction management scans unresolved requests and outcomes with stale branch tokens, including resolved success, revert, and conflict. Client service scans the indexed due rows in `client.admission_work` in bounded batches **without locking them for discovery**. Application is SQL-only: no lease, heartbeat, or separate claim transaction.
+
+1. In a short transaction, take the branch, admission, piece, and request locks in the order above. Read the current applicable outcome, then apply any Client and Storage changes.
+2. Lock the wake row last in the same transaction and recheck that it is due. If it is no longer due, roll back the candidate's changes. Otherwise clear it when done, or set a new due time for an incomplete application. Retirement leaves it due; a failed installation rolls back without consuming it. When applicability is unknown, consume the current wake without applying a revision and rely on Transaction management's revalidation wake.
+3. A publisher must lock and update the transaction request before updating the wake. If publication wins, the consumer reads the newer outcome; if application wins, the publisher leaves a fresh wake after it commits. Other admission wake producers must serialize with the facts the consumer reads under those same locks. A crash before commit leaves the wake and the application unchanged.
+
+Lifecycle and funding checks follow their own freshness schedules. Accepted work recovers independently of HTTP waiters.
 
 The SDK follows [transaction inclusion](execution-and-integrations.md#sdk-transaction-waiting) independently of local outcome application.
 
@@ -183,8 +189,8 @@ The SDK follows [transaction inclusion](execution-and-integrations.md#sdk-transa
 | Required contract preflight or parked-source evidence cannot be established | Do not accept or issue the client transaction |
 | Admission commits, then the process dies or the response is lost | Recover admission, transaction request, and applied interests; placement planning is already due |
 | A new admission races removal of a shared piece | Its applied interest and removal authorization order through the same piece lock; recheck demand before first issue |
-| Later interest snapshots reorder | Apply by source relationship and revision; old withdrawal cannot erase new interest |
-| Outcome publication or application is interrupted | Publication commits with the caller wake; lease expiry recovers a claimed run; a newer wake survives completion |
+| A reorg restores demand or revises an exact deletion | Correct the Client decision and Storage demand together; a superseded binding cannot release an interest for the new one |
+| Outcome publication races application, or either process dies | Publication commits with the caller wake; application and wake consumption commit together. A newer outcome is either read in that pass or leaves a fresh wake |
 | Transfer response is lost, or owner dies after issuing work | Reconcile the stable operation; retain unknown outcome and fence stale local writes |
 | A parking refresh response is lost or the owner dies | Recover against the same source key and requested deadline; do not assume the refresh took effect |
 | Batch formation is interrupted | Batch and placement assignments exist together or neither does |
