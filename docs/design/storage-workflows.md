@@ -141,7 +141,7 @@ Before commit, verify ordered indexes `0..N-1`, one entry/update per signed occu
 
 ### Interest application and placement planning
 
-Apply interest updates under the piece lock: lock and reread the latest pending entry, apply a higher revision or discard a stale/equal update, retain withdrawn state/revision and delete the consumed pending row atomically. Make planning due with each applied change. Concurrent enqueue either updates the locked row first or inserts after deletion commits.
+Apply interest updates under the piece lock: lock and reread the latest pending entry, apply a higher revision or discard a stale/equal update, retain withdrawn/deleted state and revision, and delete the consumed pending row atomically. Make planning due with each applied change. Concurrent enqueue either updates the locked row first or inserts after deletion commits.
 
 Freeze batches under the [ordered locks](storage-model.md#multi-piece-batches-and-lock-order). Recheck need, the destination dataset's finalized creation and accepting state, and placement assignment. Persist payload, nonce claims and ordered entries atomically. Sign after commit and persist signed authorization, provider request and submission work before issue. Retry the saved request; alternative authorizations use new placements and may reuse staged data.
 
@@ -161,7 +161,7 @@ The [inclusion revision](storage-model.md#execution-inclusion-and-acknowledgemen
 
 If a fork swaps A's and B's assigned IDs, retire each old mapping in a committed transaction before installing replacements. An installation conflict then leaves the old blocker retired. Backend membership application uses the same sequence under ordered piece locks.
 
-Explicitly withdrawn entries remain withdrawn. Otherwise terminal failure withdraws interest, installed inclusion confirms it and validated unresolved/retired state is provisional. Increment the source revision when its snapshot changes; Payments receives reconciliation keys.
+For admission outcomes, explicitly withdrawn entries remain withdrawn; otherwise terminal failure withdraws interest, installed inclusion confirms it and validated unresolved/retired state is provisional. An exact membership under [client piece deletion](storage-model.md#client-piece-deletion) follows the deletion states, not the ordinary admission rule. Increment the source revision when its snapshot changes; Payments receives reconciliation keys.
 
 Resolve removals to entry/placement, inclusion and exact external target at the authorization/observation view. Persist this binding before handoff, revalidate before issue/retry and apply later results to the recorded relationship. Reconcile escaped effects against their actual chain context.
 

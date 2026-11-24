@@ -14,7 +14,7 @@ Keep each contract in one canonical document and link to it from consumers. Add 
 | [Storage workflows](storage-workflows.md) | Admission through initial protection, transaction-aware module APIs and recovery boundaries. Extend through repair, removal, and retrieval. |
 | [Execution and integrations](execution-and-integrations.md) | Signed request/replay identity, transaction-hash response, upload preflight, and source confirmation. Complete external contracts and transaction/chain/signing integration. |
 | [Funding and lifecycle](funding-and-lifecycle.md) | Funding scope and admission policy. Complete settlement, grace/holds, termination, and run-off. |
-| `docs/design/proving-and-assessment.md` — planned | Challenges, witness verification/persistence, round deadlines, takeover, and provider assessment. |
+| [Proving and witness assessment](proving-and-assessment.md) | Client-facing schedule, PostgreSQL DDL and worker ownership, witness collection, submission and reorg recovery. Verify deployment compatibility and timing; broader provider assessment remains open. |
 | `docs/design/operations-and-verification.md` — planned | Workload/timing budgets, capacity, outages, rolling updates, observability, and verification. |
 
 The standalone [direct tus upload proposal](../proposals/tus-upload-proposal.md) is intended for sharing. Use the [execution and integration contract](execution-and-integrations.md#upload-preflight-and-destination-handoff) for the current system design.
@@ -60,7 +60,7 @@ Specify ordinary repair, provider/dataset-wide replacement, bounded overlapping 
 
 ### 5. Complete proving, assessment, and financial lifecycle
 
-Budget a full proof round including collection, fallback, takeover, sender-nonce queueing, and submission. Persist accepted witnesses, retain the original deadline, and keep failed-provider observations even after successful fallback. Exercise a reorg that leaves the beacon seed unchanged but changes the applicable challenge context before submission.
+Exercise the [proving deployment gates](proving-and-assessment.md#budgets-and-verification-gates) against target chain contracts and Curio. Complete provider assessment beyond witness-failure attribution.
 
 Specify payer/asset-scoped settlement and funding monitoring, adjustable grace/holds, operator-approved termination with rechecks, and initial run-off behavior. Keep settlement intent separate from actual progress, and payment shortfall separate from provider failure/deletion.
 

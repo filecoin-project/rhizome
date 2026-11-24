@@ -176,17 +176,7 @@ Use PieceCID and committed-tree leaf positions so requests do not require a back
 
 ### Recoverable proof rounds
 
-Identify each round by client-facing dataset and chain-derived challenge context. Persist its required slots, commitments, positions, deadline, and accepted witnesses with provider attribution. Assemble the proof by challenge index.
-
-One owner collects witnesses under a short renewable PostgreSQL-time lease. Run heartbeats independently of provider I/O. Renewal and progress writes require the current ownership generation and an unexpired lease. Other instances discover expiry through bounded scans and atomically acquire a new generation; notifications can accelerate discovery. On losing ownership, stop local collection and reconcile any issued requests that complete.
-
-A successor retains valid witnesses, requests missing slots, and works to the original deadline. Budget expiry, discovery, scheduling, reload, revalidation, and submission within that deadline. Provider request deadlines and fallback handle slow providers; lease expiry handles owner failure.
-
-Start collection as soon as one coherent chain view supplies the challenge seed and piece mapping. The verifier [schedules the challenge epoch in advance](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1234-L1274), and [Lotus derives the seed from the signed output of the drand round for that epoch](https://github.com/filecoin-project/lotus/blob/b3be770e0e236f50cc713bbe36c96f08ec3fe779/chain/rand/rand.go#L145-L213). Extra chain depth does not stabilize that seed; a reorg can still change the on-chain schedule or targets. Revalidate the context, proof status, and remaining inclusion time before submission. A ready round creates durable submission work keyed by round context, so collectors do not submit competing proofs.
-
-Proving owns `processPieceDeletions` as part of advancing the proving period. Processing deletions [clears the verifier's scheduled challenge](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1044-L1070). For an active period, reconcile proof inclusion or expiry, including any in-flight submission, before processing scheduled deletions. Complete those deletion batches before calling `nextProvingPeriod`. Proving can advance on canonical outcomes and reconcile reorgs without waiting for the confidence required to release backend copies.
-
-Begin with one MSP sending account per chain for client-facing proving. Give proving work priority before nonce allocation and bound outstanding ordinary nonces on that account: a proof cannot overtake an already assigned lower nonce.
+The [proving design](design/proving-and-assessment.md) owns the chain schedule, PostgreSQL rounds and leases, witness orchestration, and transaction handoff. One worker per client-facing dataset checkpoints verified witnesses and resumes within the original deadline after takeover. Proving collects as soon as the challenge is available, revalidates before submitting, and owns the proof → scheduled deletion processing → next period sequence. Backend copy release follows its separate confidence gate.
 
 
 ## Chain inputs: receipt-first reconciliation
