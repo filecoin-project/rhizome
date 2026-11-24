@@ -64,7 +64,7 @@ Use exact contract preflight as the sole client-side admission funding test.
 
 Evaluate backend-funding and three-SP capacity gates solely from existing module views, ordinary observations and required-work evidence. Reject when sufficiently complete evidence establishes a shortfall; treat missing or partial evidence as unknown. Retain scope, attribution, freshness and completeness with observations.
 
-Exact client preflight, suitable Upload-SP selection, and confirmation of [source availability](execution-and-integrations.md#mandatory-confirmation-retrieval-head) and [sufficient staging retention](execution-and-integrations.md#parking-refresh-and-retention) still apply. Continue normal assessment, monitoring, and backend-operation validation. Accepted obligations survive later shortfalls and uncertainty.
+Exact client preflight, suitable Upload-SP selection, and the [parked-source checks](execution-and-integrations.md#parked-source-evidence) still apply. Continue normal assessment, monitoring, and backend-operation validation. Accepted obligations survive later shortfalls and uncertainty.
 
 ## Incoming-rail settlement
 

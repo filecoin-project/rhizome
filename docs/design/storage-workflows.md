@@ -4,7 +4,7 @@ An admission is one accepted signed AddPieces request, optionally combined with 
 
 ## Observable contract
 
-- The client uses tus directly at an Upload SP. Parking confirmation, sufficient remaining retention, request validation, and required preflight precede provisional responsibility.
+- The client uses tus directly at an Upload SP. Required parked-source checks, request validation, and preflight precede provisional responsibility.
 - The SDK waits on the returned transaction hash and succeeds at successful client-to-MSP AddPieces inclusion.
 - Backend work begins after acceptance and parking confirmation; each placement completes at successful backend-SP AddPieces inclusion.
 - Reuse compatible protection and in-flight work while retaining each ordered entry's membership and interest.
@@ -28,7 +28,7 @@ sequenceDiagram
     C->>A: Create tus resource and PATCH bytes
     C->>A: Read parked result
     C->>CS: Signed client-facing AddPieces with upload ID
-    CS->>A: Check signed PieceCID by HEAD and establish retention
+    CS->>A: Check retrieval HEAD, retention, and witness readiness
     Note over CS: Validate request, funding context, admission eligibility
     Note over CS,TM: One local transaction: admission, transaction request, durable handoff
     CS->>SM: Durable provisional-interest delivery
@@ -63,7 +63,7 @@ Client-facing and backend operations proceed and reconcile independently.
 
 The [upload-preflight response](execution-and-integrations.md#upload-preflight-and-destination-handoff) supplies the MSP upload ID and the selected Upload SP's tus Creation URL and grant. The SDK creates the resource there, uploads or resumes it, reads the parked result, and submits AddPieces to MSP with an upload ID for every ordered entry.
 
-The upload ID identifies the selected provider, not proof of the upload result. Before acceptance, check the signed PieceCID at that provider with [retrieval HEAD](execution-and-integrations.md#mandatory-confirmation-retrieval-head) and establish [sufficient remaining retention](execution-and-integrations.md#parking-refresh-and-retention) independently of the tus result.
+The upload ID identifies the selected provider, not proof of the upload result. Before acceptance, establish [parked-source evidence for the signed PieceCID](execution-and-integrations.md#parked-source-evidence) at that provider independently of the tus result.
 
 ### 2. Preflight and admission decision
 
@@ -132,12 +132,12 @@ Client service locks the admission, then the branch/request and enqueues updates
 ### Acceptance and concurrent replay
 
 1. Authenticate and correlate the request, then look up its logical key through FWSS nonce claims. Recover an equivalent accepted request before admission checks; compare the complete envelope, including any creation claim.
-2. For a new request, run mandatory contract preflight, bind each signed PieceCID to the provider selected in its upload record, and apply the retrieval HEAD, retention, and other admission gates. Before returning a gate failure, recheck whether a concurrent attempt accepted the request.
+2. For a new request, run mandatory contract preflight, bind each signed PieceCID to the provider selected in its upload record, and apply the parked-source and other admission gates. Before returning a gate failure, recheck whether a concurrent attempt accepted the request.
 3. In one transaction, insert admission/entries, claim add/create keys, enqueue the exact call and enqueue each entry's initial provisional state. Persist distinct source attribution and admission evidence.
 4. On uniqueness conflict, roll back the complete transaction. Load the winning operation in a fresh transaction and compare its bound request. Recover an equivalent operation or return a conflict for different semantics/ownership.
 5. After commit, wait for persisted signed bytes/hash and submission work, then return `201` with the original hash in `Location`. Workers discover accepted work independently of the HTTP connection.
 
-Before commit, verify ordered indexes `0..N-1`, one entry/update per signed occurrence, the source binding for each entry, fresh HEAD and sufficient retention for each selected source, nonce roles/digests and the returned transaction ID.
+Before commit, verify ordered indexes `0..N-1`, one entry/update per signed occurrence, the source binding and valid parked-source evidence for each entry, nonce roles/digests, and the returned transaction ID.
 
 ### Interest application and placement planning
 
@@ -180,7 +180,7 @@ The SDK follows [transaction inclusion](execution-and-integrations.md#sdk-transa
 | --- | --- |
 | Known backend-funding or three-SP shortfall before acceptance | Retryable failure; no accepted demand or client transaction |
 | Backend readiness unknown, after required validation and parking | Do not probe solely for readiness or reject solely for missing information |
-| Required contract preflight, parking HEAD, or sufficient remaining retention cannot be established | Do not accept or issue the client transaction |
+| Required contract preflight or parked-source evidence cannot be established | Do not accept or issue the client transaction |
 | Admission transaction commits, then response or handoff is lost | Recover admission, transaction request, and handoff durably |
 | Interest deliveries reorder | Apply by source relationship and revision; old withdrawal cannot erase new interest |
 | Transfer response is lost, or owner dies after issuing work | Reconcile the stable operation; retain unknown outcome and fence stale local writes |

@@ -88,7 +88,7 @@ FWSS `352b614` supports signed dataset creation with selected terms. The inspect
 
 MSP aims to maintain three PDP copies at distinct eligible SPs. An **admission** is one accepted signed AddPieces request, which can also authorize dataset creation. At acceptance, the trusted Upload SP may hold the only copy, still awaiting commitment.
 
-MSP selects the Upload SP at tus preflight. For a new admission, validate caller authority, run exact contract preflight, and [confirm the signed PieceCID at that SP](design/execution-and-integrations.md#mandatory-confirmation-retrieval-head) and its remaining retention. MSP does not verify which upload supplied the piece. The [funding policy](design/funding-and-lifecycle.md#agreed-admission-policies) also rejects known shortfalls in backend funding or three eligible destinations. Use evidence already available for these shortfall checks; unknown backend readiness by itself permits admission. After validating authority and correlating the request, an accepted replay recovers the original operation before new-admission checks.
+MSP selects the Upload SP at tus preflight. For a new admission, validate caller authority, run exact contract preflight, and establish [parked-source evidence](design/execution-and-integrations.md#parked-source-evidence) for the signed PieceCID. MSP does not verify which upload supplied the piece. The [funding policy](design/funding-and-lifecycle.md#agreed-admission-policies) also rejects known shortfalls in backend funding or three eligible destinations. Use evidence already available for these shortfall checks; unknown backend readiness by itself permits admission. After validating authority and correlating the request, an accepted replay recovers the original operation before new-admission checks.
 
 After acceptance, start additional transfers eagerly and proceed with client-facing and Upload-SP AddPieces independently. Either commitment can finish first, while replication continues. Batch the backend AddPieces work.
 
@@ -98,7 +98,7 @@ Curio must provide [retention protection](design/execution-and-integrations.md#p
 
 Confirm parking with a HEAD to the selected Upload SP's piece URL. Require HTTP 200 and a Content-Length equal to the expected raw size. The check transfers no body, verifies neither content nor future availability, and creates no reference or lease.
 
-Client-facing AddPieces inclusion and backend AddPieces inclusion are independent. The SDK waits on the returned transaction hash and succeeds at successful client-facing inclusion; backend placement completes at successful backend inclusion. Neither requires additional chain depth or finality. MSP performs the parking HEAD before admission. See [inclusion and reorgs](design/execution-and-integrations.md#addpieces-inclusion-and-reorgs).
+Client-facing AddPieces inclusion and backend AddPieces inclusion are independent. The SDK waits on the returned transaction hash and succeeds at successful client-facing inclusion; backend placement completes at successful backend inclusion. Neither requires additional chain depth or finality. See [inclusion and reorgs](design/execution-and-integrations.md#addpieces-inclusion-and-reorgs).
 
 Admission can commit before a transaction hash is available. Wait for the hash outside the acceptance transaction. A disconnect ends that wait; the [hash response and replay contract](design/execution-and-integrations.md#transaction-hash-response-contract) preserves the accepted operation and its status identity.
 
@@ -183,6 +183,8 @@ One owner collects witnesses under a short renewable PostgreSQL-time lease. Run 
 A successor retains valid witnesses, requests missing slots, and works to the original deadline. Budget expiry, discovery, scheduling, reload, revalidation, and submission within that deadline. Provider request deadlines and fallback handle slow providers; lease expiry handles owner failure.
 
 Before submission, confirm that the chain challenge context remains applicable. A ready round creates durable submission work keyed by round context, so collectors do not submit competing proofs.
+
+Proving owns `processPieceDeletions` as part of advancing the proving period. Processing deletions [clears the verifier's scheduled challenge](https://github.com/FilOzone/pdp/blob/4d6b30f95845ca5ef35f9430a3a3f435af54d291/src/PDPVerifier.sol#L1044-L1070). For an active period, reconcile proof inclusion or expiry, including any in-flight submission, before processing scheduled deletions. Complete those deletion batches before calling `nextProvingPeriod`.
 
 
 ## Chain inputs: receipt-first reconciliation

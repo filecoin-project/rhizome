@@ -144,7 +144,7 @@ Return an MSP `uploadId`, the provider's absolute HTTPS `creationUrl`, a scoped 
 
 The SDK creates the resource at the provider with tus 1.0.0 Creation, uploads directly with PATCH, and uses resource HEAD to recover its durable accepted offset. Unknown lengths use `creation-defer-length`; the provider enforces the size limit throughout and enforces any known size exactly. Preserve the full resource and result URLs, including deployment prefixes. Expose browser CORS on the required routes and send credentials only to authorized provider origins. Resumption requires replayable input.
 
-The provider persists at most one resource per MSP upload ID, bound to its grant, before returning `201 Location`. Equivalent creation retries recover the existing resource under its access rules without resetting its offset; conflicting parameters fail and expired resources cannot be recreated under the same ID. The provider establishes authenticated resource access for HEAD, PATCH, and result lookup independent of the creation grant's lifetime. Persist acknowledged bytes and offsets, and on completion durably schedule restartable CommP computation, expected-CID validation, and retrieval publication.
+The provider persists at most one resource per MSP upload ID, bound to its grant, before returning `201 Location`. Equivalent creation retries recover the existing resource under its access rules; conflicting parameters fail and expired resources cannot be recreated under the same ID. The provider establishes authenticated resource access for HEAD, PATCH, and result lookup independent of the creation grant's lifetime. Persist acknowledged bytes and offsets. On completion, durably schedule restartable CommP computation, expected-CID validation, and retrieval publication. Capture and persist any required witness cache from the same CommP calculation rather than rereading the piece in the normal upload path.
 
 The provider advertises a repeatable, authenticated result lookup for the SDK on creation and resource HEAD responses. The result reports `receiving`, `processing`, `parked`, `failed`, or `expired`; `parked` supplies the upload ID, resulting PieceCID, and staging retention deadline. The SDK uses the PieceCID to sign AddPieces. Completing transfer or processing does not consume the resource identity. No client finalize request is required. Creation With Upload, parallel partial uploads, migration during upload, and already-present deduplication are outside this flow.
 
@@ -154,7 +154,7 @@ Provider support for grant enforcement, idempotent creation and the piece result
 
 ## Parked-source evidence
 
-For direct uploads, MSP checks the signed PieceCID at the selected provider, not the provenance or completion of a particular tus upload. Retrieval HEAD and retention evidence serve different purposes: current reachability and continued availability. Verify that the deployed retrieval route can read staged bytes before membership; publishing a reference alone does not guarantee open-pieces placement succeeded.
+For direct uploads, MSP checks the signed PieceCID at the selected provider, not the provenance or completion of a particular tus upload. Require retrieval HEAD, sufficient staging retention, and witness readiness before durable acceptance. Verify that the deployed retrieval route can read staged bytes before membership; publishing a reference alone does not guarantee open-pieces placement succeeded.
 
 ### Mandatory confirmation: retrieval HEAD
 
@@ -164,7 +164,7 @@ Bound end-to-end time and response-header size, send `Accept-Encoding: identity`
 
 Confirm the selected Upload SP. Repeated entries for the same source and PieceCID may share one correlated observation. Accepted replay recovers the existing operation without repeating admission checks.
 
-HEAD confirms current readable access and advertised length under the trusted Upload-SP model. It neither proves the content nor guarantees retention. Destination pulls verify the full content.
+HEAD confirms current readable access and advertised length under the trusted Upload-SP model. It neither proves the content nor establishes retention or witness readiness. Destination pulls verify the full content.
 
 If initial HEAD does not confirm the source, reject or defer before durable acceptance, leaving interests, transaction work, and nonce claims uncreated. Keep attribution and distinguish unavailable or unknown evidence from a confirmed length mismatch. Source loss after acceptance triggers fulfillment and reconciliation while demand remains in force.
 
@@ -172,9 +172,13 @@ If initial HEAD does not confirm the source, reject or defer before durable acce
 
 Curio must provide an authenticated MSP-to-SP retention guarantee that serializes with staging cleanup. For a direct-upload source, identify a readable copy by PieceCID at the selected provider, independent of any tus upload or result. For a pull, use the exact staging reference from the successful pull item and its expected PieceCID. Send an absolute retention deadline; the provider returns its effective guaranteed deadline only after committing the protection. Replaying the same request must not allocate another copy or move the deadline further. If the source cannot be protected, report failure rather than a guarantee. This does not protect against SP or disk failure.
 
-Before acceptance, establish enough remaining retention for each selected source to cover handoff, queueing, transfer or commitment, and recovery; refresh if needed. If there is not enough proven time after accounting for observation age and clock uncertainty, defer or reject rather than accepting on HEAD alone. Persist the source key, evidence attribution and time, and guaranteed deadline with the admission. Storage management schedules refreshes while accepted work relies on that source, including for pulled staging. A failed or uncertain refresh cannot advance the known deadline. If availability can no longer be relied on, replan from other sources without withdrawing demand.
+Before acceptance, establish enough remaining retention for each selected source to cover handoff, queueing, transfers, proving while relying on the staged copy, commitment, and recovery; refresh if needed. If there is not enough proven time after accounting for observation age and clock uncertainty, defer or reject rather than accepting on HEAD alone. Persist the source key, evidence attribution and time, and guaranteed deadline with the admission. Storage management schedules refreshes while accepted work relies on that source, including for pulled staging. A failed or uncertain refresh cannot advance the known deadline. If availability can no longer be relied on, replan from other sources without withdrawing demand.
 
 The creation deadline does not limit an existing upload. Unfinished-resource expiry and parked-piece retention are separate from it and from each other. HEAD and polling do not extend parking. Curio currently makes unclaimed PDP references GC-eligible from creation after `max(2, PDPUnclaimedUploadKeepHours)` hours (default two), except where protected by qualifying pending AddPieces work. The retention contract must integrate with that cleanup; nominal retention is not a guarantee of time remaining at admission.
+
+### Witness readiness
+
+For each selected Upload SP and signed PieceCID, require positive `witnessReady` evidence on the authenticated parking retention response before accepting a new admission. Curio reports readiness only when the MSP service can obtain an authorized piece witness from the protected staged source, without backend dataset membership, and any required cache is durable and verified against the expected CommP. Missing or negative readiness defers admission even when HEAD and retention succeed. Persist the attributed readiness observation with the other parked-source evidence; accepted replays do not recheck it.
 
 ## Provider pulls
 

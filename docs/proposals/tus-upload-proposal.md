@@ -32,11 +32,11 @@ sequenceDiagram
         S-->>C: Upload-Offset
         C->>S: PATCH remaining bytes
     end
-    S->>S: Compute commitment and prepare retrieval
+    S->>S: Compute commitment, save witness cache, prepare retrieval
     C->>S: Read upload result
     S-->>C: PieceCID
     C->>M: Signed AddPieces with upload ID
-    M->>S: Confirm piece retrieval with HEAD
+    M->>S: Check retrieval HEAD, retention, and witness readiness
     M->>M: Validate and accept AddPieces
     M-->>C: Transaction hash
 ```
@@ -83,7 +83,7 @@ The provider atomically records the resource and its grant binding before respon
 
 ### Piece processing
 
-Completing the tus transfer schedules durable provider-side processing. The provider computes CommP and raw size from the accepted bytes, checks any expected PieceCID, and publishes the piece for retrieval. Commitment calculation must survive restart, either through consistent checkpoints or recomputation from staged bytes.
+Completing the tus transfer schedules durable provider-side processing. The provider computes CommP and raw size from the accepted bytes, checks any expected PieceCID, and publishes the piece for retrieval. Use the same CommP calculation to save any [required witness cache](curio-inclusion-proof-proposal.md#staging-readiness-and-bounded-execution). Processing must survive restart, either through consistent checkpoints or recomputation from staged bytes.
 
 A separate result endpoint reports `receiving`, `processing`, `parked`, `failed`, or `expired`. A parked result contains the upload ID, PieceCID, and staging retention deadline; raw size is read from the PieceCID. Processing failures retain a reason.
 
@@ -93,7 +93,7 @@ The provider advertises the result URL in an application-specific link on creati
 
 The SDK signs the resulting PieceCID in AddPieces and supplies the upload ID alongside the signed payload. The MSP uses its upload record to identify the selected provider, not a client-supplied retrieval URL. The result endpoint is for the SDK: the MSP does not verify the direct upload result or require proof that this particular upload supplied the piece.
 
-Before accepting the request, the MSP requires HTTP 200 from the selected provider's configured piece retrieval HEAD endpoint, with Content-Length matching the raw size encoded in the signed PieceCID. It establishes sufficient remaining retention for the piece at that provider independently of the upload result and simulates the exact intended contract call to check authorization and funding.
+Before accepting the request, the MSP requires HTTP 200 from the selected provider's configured piece retrieval HEAD endpoint, with Content-Length matching the raw size encoded in the signed PieceCID. It confirms sufficient retention and [witness readiness](../design/execution-and-integrations.md#witness-readiness) independently of the upload result and simulates the exact intended contract call to check authorization and funding.
 
 Tus completion establishes byte receipt only. The parked result tells the SDK which PieceCID to submit. Neither is storage acceptance. The SDK reports storage success only after successful client-facing AddPieces inclusion on chain; backend replication proceeds separately.
 
@@ -116,7 +116,7 @@ Before deployment, verify:
 - Size violations and commitment mismatches fail processing. An expired creation grant cannot allocate a resource; an existing authorized resource can still resume and complete after the creation deadline.
 - Piece processing survives a lost final PATCH response; the client can recover its result without renewing creation credentials.
 - Uploads preserve resource URLs with deployment prefixes.
-- An unavailable piece or insufficient retention blocks admission. A piece already present at the selected SP is eligible without proof of upload provenance. Storage success remains tied to AddPieces inclusion.
+- Unavailable bytes, insufficient retention, or missing witness readiness block admission. A piece already present at the selected SP is eligible without proof of upload provenance. Storage success remains tied to AddPieces inclusion.
 
 ## Protocol reference
 
