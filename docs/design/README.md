@@ -1,6 +1,6 @@
 # Rhizome design
 
-**Status: Work in progress.** The architecture records agreed direction. The contracts below state the current design, including requirements for upstream integrations; they are not a claim that those integrations are implemented or verified.
+The architecture records agreed direction. This index tracks the design contracts and remaining work.
 
 [Architecture](../architecture.md) defines system boundaries and ownership; [engineering principles](../engineering/principles.md) guide implementation. This plan tracks the remaining schema, integration, deployment and operational decisions.
 

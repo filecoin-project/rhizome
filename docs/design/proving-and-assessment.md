@@ -1,12 +1,12 @@
 # Client-facing proving and witness assessment
 
-This is Rhizome's PostgreSQL and execution design for client-facing PDP. It is not a claim that the target chain deployment or Curio implements the required integration. MSP proves its client-facing datasets; backend SPs prove their own datasets independently and supply piece witnesses to MSP. This document covers assessment of those requests, not general provider monitoring policy.
+MSP proves its client-facing datasets. Backend SPs prove their own datasets independently and supply piece witnesses to MSP. This design covers the PostgreSQL work records, proof execution, and witness request assessment.
 
 ## Ownership and inputs
 
 | Owner | Contract |
 | --- | --- |
-| Proving | One leased worker per client-facing dataset. Owns schedule reconciliation, immutable rounds, verified witness progress, and the intent to activate, prove, process scheduled deletions, or advance. There is no independent worker queue for SP requests or proof slots. |
+| Proving | Uses a shared worker pool and leases only due datasets, with at most one owner per dataset. Owns schedule reconciliation, rounds, witness progress, and period actions. SP requests and proof slots have no separate worker queue. |
 | Chain access | Provides a coherent chain view and its branch token, canonicality, and historical reads. A read of related verifier/listener state must not mix independently resolved `latest` calls. |
 | Client service | Makes managed datasets and lifecycle changes discoverable to Proving. Owns membership bindings and authorizes scheduling client removals. Applies actual processed deletions using the [deleting-interest contract](storage-model.md#client-piece-deletion). |
 | Storage management | Resolves the exact challenged membership to its storage scope and serves current authorized witness sources, including staged sources. Owns retention, protection, and alternate placements. Missing or stale membership is a retryable lookup failure; never infer access from PieceCID alone. |
@@ -140,7 +140,9 @@ CREATE INDEX proving_failures_due ON proving.witness_failures (observed_at, atte
 
 ## Claiming, waking, and fencing
 
-Use short `READ COMMITTED` transactions. `due_at` is the next local reconciliation time; `NULL` suspends ordinary work when no near-term follow-up is due. A live lease moves `claim_at` forward; no sweeper must clear it before takeover. Claim only when a worker slot is available. An instance may claim a bounded number by repeating the following query; the index gives due order within a supported work format. `SKIP LOCKED` is not a strict fairness or deadline guarantee.
+Workers poll a shared PostgreSQL queue; no worker is assigned to a dataset while it waits. The durable signal is `proving.datasets.due_at`: `NULL` means no scheduled run, and a future value schedules a run without keeping a lease. The generated `claim_at` is the later of `due_at` and any lease expiry, so expired work becomes claimable without a sweeper.
+
+Claim only when a worker slot is available, in a short `READ COMMITTED` transaction. For example, a worker that sees a future challenge persists its next wake and releases the lease. When the row becomes due, any instance can claim it. An instance may claim a bounded number by repeating the query below. `SKIP LOCKED` is not a strict fairness or deadline guarantee.
 
 ```sql
 -- claim: $1 supported work format, $2 lease interval
@@ -229,4 +231,4 @@ The per-dataset lease is the initial work unit. For a round with $S$ slots and $
 | Deletion tail changes, removal batches cross a restart, or deletion receipt reorgs | Only actual receipt IDs update their exact interests. Next period does not wait for the backend release gate, but copies stay protected when removal evidence is stale. |
 | Ordinary transactions occupy low nonces during a proof burst | Admission/backpressure preserves the measured submission reserve for proving; if one sender cannot meet it, reassess sender allocation before increasing witness fan-out. |
 
-Deployment gates: pin the actual verifier/listener versions and chain RPCs, exercise first activation and reactivation around inclusion/window boundaries, validate chain view and nonce-resolution behavior under reorg, and measure the Curio staging and fallback path. The design does not presume those checks have passed.
+Deployment gates: pin the verifier/listener versions and chain RPCs, exercise first activation and reactivation around inclusion/window boundaries, validate chain view and nonce-resolution behavior under reorg, and measure the Curio staging and fallback path.

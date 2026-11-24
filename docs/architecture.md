@@ -176,7 +176,7 @@ Use PieceCID and committed-tree leaf positions so requests do not require a back
 
 ### Recoverable proof rounds
 
-The [proving design](design/proving-and-assessment.md) owns the chain schedule, PostgreSQL rounds and leases, witness orchestration, and transaction handoff. One worker per client-facing dataset checkpoints verified witnesses and resumes within the original deadline after takeover. Proving collects as soon as the challenge is available, revalidates before submitting, and owns the proof → scheduled deletion processing → next period sequence. Backend copy release follows its separate confidence gate.
+The [proving design](design/proving-and-assessment.md) owns the chain schedule, PostgreSQL rounds and leases, witness orchestration, and transaction handoff. A shared worker pool claims due datasets, with at most one owner per dataset. Proving collects as soon as the challenge is available, checkpoints verified witnesses for takeover, revalidates before submitting, and owns the proof → scheduled deletion processing → next period sequence. Backend copy release follows its separate confidence gate.
 
 
 ## Chain inputs: receipt-first reconciliation
