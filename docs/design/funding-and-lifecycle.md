@@ -10,7 +10,7 @@ Observe each Filecoin Pay payer account at its payment-contract, token, and paye
 
 Client-side and SP-side storage terms are separate commercial relationships. Assess MSP backend funding independently of client funding. Mixed client-side terms do not partition placement reuse; reuse can reduce backend costs while preserving the client's signed memberships and contract-enforced charges.
 
-Coalesce client changes into current account/rail-discovery requests. Publish observations under account/rail-scoped ownership and chain-applicability checks. Retain each settlement intent and its actual receipt progress and amounts.
+A [coalesced wake](execution-and-integrations.md#durable-work-coordination) lets Payments discover current account/rail bindings from client dataset changes. Read chain evidence outside PostgreSQL transactions. Under the account or rail lock, check the captured observation revision, live claim, and chain applicability before publishing; on a conflict refresh or leave the key due unless the winning evidence satisfies the same obligation.
 
 ## Contract preflight
 
@@ -68,7 +68,12 @@ Exact client preflight, suitable Upload-SP selection, and the [parked-source che
 
 ## Incoming-rail settlement
 
-Payments persists the rail and requested target epoch, constructs `FilecoinPayV1.settleRail(railId, untilEpoch)` with zero value, and owns any semantic reduction of the target. Transaction management returns receipt/logs, actual included hash, and chain reference.
+Reconcile each incoming rail at `(chain, payment contract, rail ID)`. Payments chooses the target epoch and owns settlement intent and actual progress; Transaction management owns the call's execution and revisable outcome.
+
+1. Read applicable outcomes for the rail's outstanding or revised intents and refresh rail/proving evidence if needed. Apply matched receipt evidence idempotently under the rail lock. Retain actual progress and amounts by intent and receipt, not by the requested target.
+2. Do not open another settlement while an earlier effect is unresolved. An unknown send is recovered through the same transaction request; an applicable no-op or revert is a known transaction outcome, not unresolved transport. Refresh evidence or defer rather than repeatedly issuing a call that cannot advance the rail.
+3. If current evidence supports more settlement, record a new intent and enqueue the exact zero-value `FilecoinPayV1.settleRail(railId, untilEpoch)` call in one transaction. Recheck the current rail state, existing intents and evidence applicability at commit. Partial progress can justify a new intent even when its target epoch is unchanged. The caller wake is keyed to the rail, not the individual receipt.
+4. After a fork, stop counting invalidated progress and amounts as current without deleting their evidence. Refresh the rail's canonical progress and reconcile reopened effects, including any later operation already issued. Only Payments can approve a new business target; Transaction management retains the original call and resolves any escaped sender nonce.
 
 Decode logs from the expected payment contract for the expected rail:
 
@@ -80,6 +85,8 @@ Decode logs from the expected payment contract for the expected rail:
 | Revert/no progress | Another actor may have settled this permissionless rail, or the range may be unavailable. Payments decides whether to recheck or defer; Transaction management preserves the requested business target. |
 
 Solidity return values are not receipt data. Read rail/proving state to choose a valid target or resolve ambiguous progress when existing evidence is insufficient; funding and termination decisions may independently require fresh state. Settlement cadence and gas trade-offs remain policy decisions.
+
+Verification scenarios: lost submission response leaves one outstanding intent; duplicate receipt application does not double-count money; partial settlement can advance the rail without meeting the target; a no-op or finalization-only receipt does not invent progress; and a fork that revises an earlier receipt does not authorize another settlement while that effect is unresolved.
 
 ## Contract exercise evidence
 

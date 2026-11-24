@@ -37,21 +37,21 @@ CREATE TABLE proving.datasets (
     chain_key text NOT NULL,
     verifier evm_address NOT NULL,
     onchain_dataset_id uint256 NOT NULL,
+    checked_branch text,
+    active_round_id uuid,
+    UNIQUE (chain_key, verifier, onchain_dataset_id)
+);
+CREATE INDEX proving_by_chain ON proving.datasets (chain_key, id);
+
+CREATE TABLE proving.dataset_work (
+    dataset_id uuid PRIMARY KEY REFERENCES proving.datasets(id),
     due_at timestamptz,
     lease_until timestamptz,
     generation bigint NOT NULL DEFAULT 0 CHECK (generation >= 0),
-    wake_revision bigint NOT NULL DEFAULT 0 CHECK (wake_revision >= 0),
-    checked_branch text,
-    active_round_id uuid,
-    claim_at timestamptz GENERATED ALWAYS AS (
-        CASE WHEN due_at IS NOT NULL THEN greatest(due_at, lease_until) END
-    ) STORED,
-    UNIQUE (chain_key, verifier, onchain_dataset_id),
-    CHECK (lease_until IS NULL OR due_at IS NOT NULL)
+    claim_at timestamptz GENERATED ALWAYS AS (coalesce(lease_until, due_at)) STORED
 );
-CREATE INDEX proving_due ON proving.datasets (claim_at, id)
+CREATE INDEX proving_due ON proving.dataset_work (claim_at, dataset_id)
     WHERE claim_at IS NOT NULL;
-CREATE INDEX proving_by_chain ON proving.datasets (chain_key, id);
 
 CREATE TABLE proving.rounds (
     id uuid PRIMARY KEY,
@@ -139,43 +139,13 @@ CREATE INDEX proving_failures_due ON proving.witness_failures (observed_at, atte
 
 ## Claiming, waking, and fencing
 
-Workers poll a shared PostgreSQL queue; no worker is assigned to a dataset while it waits. The durable signal is `proving.datasets.due_at`: `NULL` means no scheduled run, and a future value schedules a run without keeping a lease. The generated `claim_at` is the later of `due_at` and any lease expiry, so expired work becomes claimable without a sweeper.
+Proving claims the dataset key in `proving.dataset_work` using the [shared wake and lease protocol](execution-and-integrations.md#claims-and-concurrent-wakes). Register this row with the managed dataset. `Proving.MakeDue(tx, datasetKey, due)` updates the work row, not the dataset; later wakes never invent a managed dataset. A future challenge schedules a wake without occupying a worker slot or keeping the lease.
 
-Claim only when a worker slot is available, in a short `READ COMMITTED` transaction. For example, a worker that sees a future challenge persists its next wake and releases the lease. When the row becomes due, any instance can claim it. An instance may claim a bounded number by repeating the query below. `SKIP LOCKED` is not a strict fairness or deadline guarantee.
+Wake datasets on applied membership or lifecycle changes, revised transaction outcomes, or branch changes. Transaction management publishes outcomes and wakes the dataset in the same transaction without taking the dataset lock. Proving reads applicable outcomes for its actions, including previously resolved actions with revisions it has not applied. Keep each action's evidence; one wake may cover several actions.
 
-```sql
--- claim: $1 lease interval
-WITH candidate AS (
-    SELECT id FROM proving.datasets
-    WHERE claim_at <= statement_timestamp()
-    ORDER BY claim_at, id
-    LIMIT 1 FOR UPDATE SKIP LOCKED
-)
-UPDATE proving.datasets AS d
-SET generation = d.generation + 1,
-    lease_until = clock_timestamp() + $1::interval
-FROM candidate
-WHERE d.id = candidate.id
-RETURNING d.id, d.generation, d.wake_revision, d.active_round_id, d.lease_until;
-```
+On a known fork Proving walks affected chain rows in bounded keyset batches, including dormant datasets with revisable outcomes. If `checked_branch` differs, wake the dataset rather than advancing the token without reconciliation. Restart the sweep after outage or token change. Periodic reconciliation backs up hints; normal head advances do not enumerate every dataset. A stale wake alone cannot reactivate an inactive or terminated dataset.
 
-`Proving.MakeDue(tx, datasetKey, due)` locks the dataset row, increments `wake_revision`, and moves `due_at` to `least(due_at, due)` (`least` ignores nulls in PostgreSQL). Only a managed-dataset handoff from Client service may create a row; later hints never invent a dataset. Wakes cover applied membership and lifecycle changes, relevant transaction outcomes, and changed chain branches. Use durable scans even when no notification arrives: Transaction management retains unacknowledged revisions, and Proving walks rows on the affected chain in bounded keyset batches, including dormant datasets with revisable outcomes. If a row's checked token differs from Chain access's current token, wake it rather than amending the token without reconciliation. Restart the sweep after outage or token change. Periodic reconciliation of managed datasets backs up hints; never enumerate every dataset on every head change. A normal head advance wakes only indexed due work. Inactive/terminated datasets must not be reactivated solely because a stale wake arrived.
-
-Maintain a heartbeat independent of provider or chain I/O. For renewal, witness acceptance, action enqueue, and completion, lock the dataset row **before** comparing the live generation and `lease_until` to `clock_timestamp()`. For chain-dependent publication acquire the shared [reconciliation-basis](storage-model.md#execution-inclusion-and-acknowledgement-records) lock first and compare the captured branch; take dataset, action, then Transaction management request locks in that order. The dataset row lock serializes the protected write after validation; keep those transactions short. When accepting witnesses also require the captured active round; when enqueueing a proof require the current plan and a current chain decision. If any fence fails, roll back and stop using that claim or refresh the stale input. Provider observations for a batch can be queued in the same fenced transaction as its progress. On ownership loss do not report outstanding requests as failures; responses that did not reach a committed checkpoint can be recollected.
-
-```sql
--- Complete after SELECT ... FOR UPDATE on this dataset in the same transaction.
--- $1 dataset, $2 claimed generation, $3 wake revision seen by the reconciliation,
--- $4 next due time (NULL if none)
-UPDATE proving.datasets
-SET due_at = CASE WHEN wake_revision = $3 THEN $4::timestamptz
-                  ELSE least(due_at, $4::timestamptz) END,
-    lease_until = NULL
-WHERE id = $1 AND generation = $2 AND lease_until > clock_timestamp()
-RETURNING id;
-```
-
-For completion, use the wake revision read before the inputs on which the decision depends. A producer that wins the row lock first leaves a changed revision and its wake survives. A producer that arrives later makes the released row due again. When draining, stop claiming and release a claim when safe; process death is recovered by ordinary expiry. No RPC, signing, or provider I/O holds a database lock.
+For chain-dependent writes, take the shared [reconciliation-basis](storage-model.md#execution-and-inclusion-records) lock first, compare the captured branch, then take dataset, action, and Transaction management request locks as needed. Fence on the work row last and roll back if the lease or generation is no longer current. Witness acceptance also requires the captured active round; proof enqueue also requires the current plan and chain evidence. Publish provider observations with the fenced checkpoint. Renew the lease independently of provider or chain I/O. Lost ownership does not count as provider failure; the successor can recollect responses that did not reach a checkpoint.
 
 ## Reconciliation and period advancement
 
@@ -203,10 +173,10 @@ Make deletion processing due as soon as the current proof is reconciled or the c
 
 ### Transaction handoff and recovery
 
-1. For a ready proof assemble ordered slots and derive calldata, fee/value and sender from the applicable verifier and fresh chain evidence. Before enqueue, recheck live ownership, branch, outstanding actions and canonical context. In one transaction insert the action and call `Transactions.Enqueue` with the exact chain, sender, target, value and calldata. These writes commit together; a crash cannot leave an apparently ready action with no transaction request. If a concurrent effect already satisfies the purpose, reconcile it instead of submitting another call.
+1. For a ready proof assemble ordered slots and derive calldata, fee/value and sender from the applicable verifier and fresh chain evidence. In one transaction recheck ownership, branch, outstanding actions and canonical context, insert the action, and call `Transactions.Enqueue` with the exact call and dataset wake key. A crash cannot leave an apparently ready action with no transaction request. If a concurrent effect already satisfies the purpose, reconcile it instead of submitting another call.
 2. Before first broadcast, rebroadcast or fee replacement, Transaction management obtains a fresh Proving decision against the exact action: valid, temporarily undecidable, or obsolete. The check performs chain I/O outside locks. It verifies the current period and proof status, ordered targets, effective window and remaining inclusion time for a proof; for a transition it checks the phase, queue and expected inclusion window. A missing RPC result blocks issue/reissue, not receipt tracking. Recheck the request and nonce assignment and persist the exact signed attempt as possibly sent before RPC. There is no separate proving-specific branch fence at send time. A reorg can still race broadcast or replay a transaction already in the network.
 3. If an obsolete action never escaped, stop it and resolve its reservation through Transaction management. Do not abandon a lower nonce if later assignments depend on consuming it. If the action may have escaped, stop rebroadcasting its obsolete payload and resolve the assigned nonce by canonical execution, revert, or a confirmed replacement that consumes the same nonce without the obsolete effect. A timeout, cancelled RPC or local lease loss does not free an escaped nonce. Transaction management publishes a revised outcome even for an action stopped before broadcast. Do not dispatch an incompatible transition while the effect is unresolved: verifier entry points do not bind every call to its expected round. Already-issued later nonces cannot be recalled; after a fork reconcile earlier nonce effects and the actual canonical dataset state before granting further issue.
-4. Apply the current branch-validated outcome and acknowledge its revision atomically. For deletion batches, enqueue a durable handoff through Client service's API in that same transaction, keyed by request ID and revision with receipt reference and exact verifier dataset/piece IDs. Client service resolves the historical membership binding, revises or retracts invalidated evidence, and owns confidence/release scanning; Proving must not clear storage interests. This enqueue takes no Client admission locks. Transaction management exposes later outcome revisions for resolved actions as well as unresolved ones, until acknowledged. On a fork, wake and reconcile affected actions, even if the pending-action slot has since moved on. Preserve the original intent and reconcile the earliest unresolved sender effect; never mark an old proof valid merely because the same nonce or seed reappeared.
+4. Apply the current branch-validated outcome and record its revision on the action atomically. For deletion batches, enqueue the exact effect evidence through Client service's API in that same transaction, keyed by request ID and revision with receipt reference and verifier dataset/piece IDs. Coalescing dataset wakes must not discard evidence for distinct deletion batches. Client service resolves the historical membership binding, revises or retracts invalidated evidence, and owns confidence/release scanning; Proving must not clear storage interests. This enqueue takes no Client admission locks. On a fork reconcile revised outcomes even if the action no longer occupies the pending slot. Preserve the original intent and reconcile the earliest unresolved sender effect; never mark an old proof valid merely because the same nonce or seed reappeared.
 
 `resolved_at` releases the one-new-action slot; it does not mean an outcome can no longer change. If a fork reopens an older effect while a newer action occupies that slot, leave the old row closed for new issue. Reconcile its revised outcome through the same transaction request and hold any incompatible send until the older effect is resolved. A consumed lower nonce is not evidence that a proof succeeded.
 

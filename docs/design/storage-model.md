@@ -63,7 +63,7 @@ Proving processes scheduled deletions and supplies the exact [`PiecesRemoved`](h
 
 ## Invariants and atomicity
 
-1. **One entry, one continuing interest:** confirmation promotes that entry's provisional interest; delivery and confirmation are idempotent.
+1. **One entry, one continuing interest:** acceptance applies provisional interest atomically; confirmation promotes the same interest.
 2. **Relationship-scoped updates:** apply each withdrawal to its source entry and revision, preserving other entries and newer admissions.
 3. **Shared retention:** a placement required by any continuing compatible interest cannot be authorized for removal as though unneeded.
 4. **Serialized planning decisions:** each committed plan accounts for interests, placements, and outstanding work within its consistency scope. Two transactions cannot both publish additions based on the same stale deficit.
@@ -74,7 +74,7 @@ Proving processes scheduled deletions and supplies the exact [`PiecesRemoved`](h
 9. **Unresolved effects remain tracked:** lost responses, timeouts, cancellation and expired claims preserve the operation for reconciliation.
 10. **Recoverable follow-on work:** applying an interest or outcome atomically leaves its reconciliation discoverable.
 
-Modules access records through their owners' interfaces. Planners use Storage management's applied interest view. When interest arrives after removal authorization, planning accounts for that outgoing placement.
+Modules access records through their owners' interfaces. Planners use Storage management's applied interest view. A new admission commits its interest under the same piece lock as removal authorization. An authorized removal counts as outgoing until it is resolved or cancelled. Under the piece lock recheck demand before marking a removal as possibly issued; cancel an unissued removal if the placement is needed again.
 
 ## Reuse compatibility
 
@@ -93,9 +93,9 @@ Use one stable coordination row per PieceCID within the MSP's storage scope. All
 4. Apply the domain change and publish durable follow-on work atomically. Preserve stable external operation identities and the exact immutable payload of issued work.
 5. Commit, releasing the lock. Execute external I/O only from durable intent after that transaction.
 
-All planning-fact mutations follow this protocol: interest application, placement intent, transfer results, removal authorization, batch assignment and backend outcomes. Claims and heartbeats fence worker ownership separately.
+All planning-fact mutations follow this protocol: interest application, placement intent, transfer results, removal authorization, batch assignment and backend outcomes. A planning pass is SQL-only and uses the piece lock, not a worker lease. Leases fence the separate executors that span I/O.
 
-When planning is deferred, the transaction applying the change leaves reconciliation due. The planner later acquires the same row and reads current inputs.
+When a fact change does not plan immediately, it leaves the piece's due marker set in the same transaction. The planner later acquires the same row and reads current inputs.
 
 Retain coordination rows while interests, placements, pending updates, unresolved operations or reconciliation refer to them. Creation and any later cleanup preserve one serialization point under concurrent access.
 
@@ -103,7 +103,7 @@ Retain coordination rows while interests, placements, pending updates, unresolve
 
 Batch discovery reads candidate ready placements. A bounded freezing transaction takes distinct piece locks in canonical order, rechecks need/readiness and absence of a prior frozen entry, then validates that the destination dataset is open for additions and its on-chain ID matches its finalized creation result. Persist the exact ordered entries atomically, preserving every signed entry and interest.
 
-For chain-applicability checks, first acquire a shared lock (`FOR SHARE`) on the chain's `chain.reconciliation_basis` row. Its branch token identifies the observed canonical branch. Then acquire storage locks in order: piece rows sorted by `(managed_scope, piece_cid)` bytes; destination slots/datasets by ID; FWSS nonce claims by `(chain_key, fwss, payer, nonce)`; then placement, batch and operation rows by ID.
+For chain-applicability checks, first acquire a shared lock (`FOR SHARE`) on the chain's `chain.reconciliation_basis` row. Its branch token identifies the observed canonical branch. Then acquire storage locks in order: piece rows sorted by `(managed_scope, piece_cid)` bytes; destination slots/datasets by ID; FWSS nonce claims by `(chain_key, fwss, payer, nonce)`; then placement, batch and operation rows by ID. Admission acceptance also takes distinct piece locks before claiming FWSS nonces. Take separate scheduling locks last under the [work coordination contract](execution-and-integrations.md#durable-work-coordination).
 
 Apply batch outcomes under the affected piece locks, recording the outcome and exact placement changes together. Fetch receipt/nonce evidence before entering the transaction, then validate its applicability during application.
 
@@ -116,7 +116,7 @@ The protocol serializes local planning facts. Provider assessments and chain obs
 ### Required concurrency scenarios
 
 - Two initial admissions of the same piece create/find one coordination row. The second planner sees the first's published placement work, even if the clients use different StorageTermIds.
-- Alice's withdrawal and Bob's interest application order through that row. A removal authorized first remains outgoing when Bob's interest is applied; Bob's interest applied first must be considered before authorization.
+- Alice's withdrawal and Bob's acceptance order through the same piece row. If Bob accepts first, removal authorization sees his interest. If removal was authorized first, recheck Bob's demand before marking it as possibly issued. A possibly issued removal remains outgoing and is reconciled against its exact target.
 - Two batch workers selecting overlapping placements cannot assign the same placement to different frozen batches.
 - Applying A-old's removal and A-new's addition, in either order, changes only their specific placements.
 - Process loss releases PostgreSQL locks without erasing committed intent. Recovery reacquires the row and re-evaluates; it does not depend on the former instance returning.
@@ -131,7 +131,7 @@ SQL schemas identify module ownership. Local IDs are UUIDs and local revisions a
 
 `tx.fwss_nonce_claims` assigns each `(chain, FWSS contract, payer, nonce)` to a module's logical operation and authorization digest. Transaction management owns the table; Client service and Storage management insert claims through its API. Creation and addition share this key space. Insert claims in key order and commit them with the operation.
 
-Owner APIs validate authorization bindings, complete nonce claims, contiguous entry indexes and complete handoffs before commit.
+Owner APIs validate authorization bindings, complete nonce claims, contiguous entry indexes and an applied provisional interest per entry before commit.
 
 Client service owns preflight upload records. Retain the stable MSP upload ID, authenticated client and client-scoped idempotency key, immutable constraints, chosen SP and endpoint binding, and creation deadline. Retain enough to replay the original preflight without extending that deadline. This record authorizes staging and identifies the provider; it is not an admission, a nonce claim, or evidence of uploaded bytes.
 
@@ -210,26 +210,27 @@ Entries retain their PieceCID and selected SP. `admission_evidence` associates e
 
 `source_revision` orders the interest updates Client service publishes for an entry; `source_state` holds its published interest state. `service_requested` records the client's continuing service intent, not the current retention requirement. Acceptance sets it true; explicit withdrawal clears it. A chain-derived admission failure can publish `withdrawn` while preserving the intent for reorg recovery. For an on-chain removal use the [deletion states](#client-piece-deletion), not `withdrawn`. Request cancellation preserves accepted intent.
 
-### Execution, inclusion, and acknowledgement records
+### Execution and inclusion records
 
 Record keys and fields follow. Use foreign keys within a module and owner APIs for cross-module references.
 
 | Record / owner | Required fields and constraints |
 | --- | --- |
-| `tx.requests` / Transaction management | `id` PK; `UNIQUE(caller_module, caller_operation_id)`; exact call/sender/chain, format version, **one current outcome**, its revision/nullable inclusion revision, validated branch token, pending-delivery marker and retry due time. Resolved outcomes become due when their branch token is stale; unresolved work retains timed retries. |
+| `tx.requests` / Transaction management | `id` PK; `UNIQUE(caller_module, caller_operation_id)`; exact call/sender/chain, caller wake key, format version, **one current outcome**, its revision/nullable inclusion revision, validated branch token and retry due time. Resolved outcomes become due when their branch token is stale; unresolved work retains timed retries. |
 | `tx.sender_accounts` / Transaction management | PK `(chain_key, sender)`; attributed chain nonce evidence. Lock the row to allocate against live local reservations. |
 | `tx.nonce_assignments` / Transaction management | `id` PK; request FK, chain/sender/transport nonce, ownership generation/expiry and resolution reference. Partial unique indexes reserve each live nonce and one live assignment per request. Replacements share it; expiry cannot release the reservation. |
 | `tx.attempts` / Transaction management | PK `(request_id, attempt_number)`; request-scoped assignment FK, `UNIQUE(chain_key, tx_hash)`, signed bytes and broadcast/reconciliation state. Number persisted signed transactions from 1; the first hash is the original response alias, and every retained hash resolves to its request. |
 | `tx.receipts` / Transaction management | Key `(chain_key, tx_hash, immutable_block_ref)`; correlated receipt/log evidence and optional local-attempt link. Supports MSP submissions, externally recovered execution and conflicting nonce consumption. Retain evidence needed by replay or effects. |
 | `chain.reconciliation_basis` / Shared chain access | PK `chain_key`; observed branch token. It changes on a known fork and remains stable through ordinary head advances. Publication and outcome reads hold a shared row lock while validating it. |
+| `client.admission_work` / Client service | PK/FK by admission ID; [leased wake state](execution-and-integrations.md#claims-and-concurrent-wakes). Register with the admission so Transaction management can wake it without taking the admission lock. |
 | `client.inclusions` / Client service | PK `(admission_id, inclusion_revision)`; verifier, dataset, first assigned piece ID, entry count and receipt reference. Admission-scoped FK from `admissions.current_inclusion_revision`. |
 | `client.memberships` / Client service | Current reverse lookup: PK `(chain_key, verifier, data_set_id, piece_id)`; `UNIQUE(admission_id, entry_index)`; entry and inclusion FKs. Retire invalidated mappings before installing replacements. Derive historical ordered IDs from validated first-ID/count and immutable entries. |
 | `client.removals` / Client service | Resolved `(admission_id, entry_index, inclusion_revision)`, exact chain/verifier/dataset/piece target, and immutable authorization/observation reference. Persist before handoff or issue; apply scheduling and processing outcomes to that binding. Retain the evidence used to release demand. |
-| `payments.reconcile_due` / Payments | PK `(chain_key, fwss, payer, client_data_set_id)`; due time, evidence hint and work ownership. Coalesces dataset-discovery requests. Payments resolves and observes shared account/rail scope through receipts or targeted state reads. |
+| `payments.reconcile_due` / Payments | PK `(chain_key, fwss, payer, client_data_set_id)`; coalesced wake for dataset discovery. Payments resolves and observes shared account/rail scope through receipts or targeted state reads. |
 
 The **inclusion revision** is the outcome revision that established the current successful inclusion. Carry it through subsequent evidence updates. Invalidation clears it; restoration or a changed binding uses the new outcome revision. Revalidate inclusions against the current branch token before applying their mappings.
 
-Publish meaningful outcome changes by updating the current snapshot, incrementing its revision and setting pending delivery atomically. Application clears pending delivery conditionally for that revision. Retirement leaves it pending until the replacement or current non-inclusion outcome is applied.
+Use [transaction outcome publication](execution-and-integrations.md#transaction-outcome-publication). Callers record applied revisions with their own domain writes. Retirement leaves the admission due until the replacement or current non-inclusion outcome is applied.
 
 The SDK derives success and ordered IDs from transaction inclusion. Client service applies the corresponding inclusion, entry and membership records independently. Retain receipt evidence and removal targets needed by unresolved work and supported replay.
 
@@ -241,11 +242,11 @@ Apply the [recovery principles](../engineering/principles.md#failure-must-not-cr
 
 ### Interest application and reconciliation
 
-Client service owns each admission entry and publishes its requested service state through `Storage.EnqueueInterest` in the transaction that changes the entry. Storage management owns the pending updates and applied interests. Its worker applies each update under the piece lock, making placement planning due. This handoff lets Client service record accepted demand and chain outcomes independently of placement planning, while Storage management combines demand from multiple entries for the same piece.
+Client service owns admission entries. Storage management applies the initial snapshot for every entry, including its source attribution, in the acceptance transaction. Client service publishes later revisions through `Storage.EnqueueInterest` in the transaction that changes the entry. The inbox carries mutable membership context and release evidence so the piece-locked Storage consumer need not acquire Client service's domain locks.
 
 | Record / owner | Required fields and constraints |
 | --- | --- |
-| `storage.interest_updates` / Storage management | PK `(admission_id, entry_index)`; latest revision, complete mutable source state/membership context and applicable release evidence, scope/CID lock key, payload version and due time. Upsert only a higher revision; same revision/different payload is a contract violation. Initial source attribution is supplied once and retained until copied into the applied interest. |
+| `storage.interest_updates` / Storage management | PK `(admission_id, entry_index)`; latest post-acceptance revision, complete mutable source state/membership context and applicable release evidence, scope/CID lock key, payload version and due time. Upsert only a higher revision; same revision/different payload is a contract violation. |
 | `storage.interests` / Storage management | PK `(admission_id, entry_index)`; immutable scope/CID and initial source attribution, applied revision, state and membership context, and applicable release evidence. Index by piece. Retain withdrawn/deleted state and revision to reject delayed updates. |
 
 `storage.pieces.plan_after` schedules per-piece reconciliation:
@@ -262,13 +263,9 @@ CREATE INDEX pieces_due ON storage.pieces
     WHERE plan_after IS NOT NULL;
 ```
 
-Under the piece lock, a planning-fact change makes `plan_after` due, preserving any earlier due time. Planning reads current facts and either clears it with durable decisions/follow-on work or reschedules a blocked deficit. The transaction spans no external I/O. A later change acquires that same lock and makes it due again, so clearing cannot lose a concurrent wake-up.
+Under the piece lock, a planning-fact change makes `plan_after` due, preserving any earlier due time. A worker claims the due piece by taking that row lock, for example with `FOR UPDATE SKIP LOCKED`. After acquiring it, read current facts, publish only the remaining deficit, and clear or reschedule `plan_after` in the same transaction. There is no separate job or lease. A later writer takes the same lock and makes the piece due again.
 
-Enqueue coalesces into one pending row per entry, retaining initial source attribution until first application. Application locks the piece, then reads the locked pending row's latest snapshot. Apply a higher revision and make planning due, or discard a stale/equal revision; atomically delete the consumed pending row. A concurrent producer updates before the locked read or inserts after deletion commits. Applied interests retain source attribution for subsequent updates.
-
-Payments claims a due key and clears its pending due time before external reads. Concurrent notifications set it due again; completion preserves that new due time. Expired claims remain discoverable.
-
-Publish Payments observations under the account/rail lock. Compare the captured observation identity, ownership and branch applicability. On conflict refresh under the claim or make the key due before completion, unless the winning evidence satisfies the same obligation.
+Enqueue coalesces later snapshots into one pending row per entry. Application locks the piece, then reads the locked pending row's latest snapshot. Apply a higher revision and make planning due, or discard a stale/equal revision; atomically delete the consumed pending row. A concurrent producer updates before the locked read or inserts after deletion commits. Initial source attribution remains on the applied interest.
 
 ### Initial protection records
 

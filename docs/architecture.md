@@ -59,7 +59,7 @@ Transaction management, Chain access, provider HTTP adapters, and the signing in
 - **Client requirements and backend work:** Client service determines what MSP should fulfill. Storage management decides how shared placements satisfy those requirements and reconciles backend copies asynchronously.
 - **Domain decisions and external execution:** Domain modules create durable operations and interpret the results. Transaction management and adapters execute those operations. Modules own their records and expose interfaces to other modules.
 
-PostgreSQL preserves accepted obligations and necessary results across instances. Use durable handoffs for independently owed work and retain recovery facts under the [recovery principle](engineering/principles.md#failure-must-not-create-an-unrecoverable-state).
+PostgreSQL preserves accepted obligations and necessary results across instances. Use [keyed reconciliation](design/execution-and-integrations.md#durable-work-coordination): apply local changes together when possible, make remaining work due, and execute external mutations from durable intent. Retain recovery facts under the [recovery principle](engineering/principles.md#failure-must-not-create-an-unrecoverable-state).
 
 ### Working scope boundary
 
@@ -114,7 +114,7 @@ Derive protection progress from usable sources, established placements, outstand
 
 Plan each piece against its current interests, placements, and outstanding work. Count established protection, account for suitable additions in flight, and publish bounded work for the remaining deficit. Exclude outgoing removals from continuing protection; their bytes may remain available as a source.
 
-Use the [storage model's protocol](design/storage-model.md#invariants-and-atomicity) for planning, removal authorization, batch freezing, outcome application, and interest delivery. Take the stable per-piece coordination row in a short `READ COMMITTED` transaction, with a consistent lock order for multi-piece batches. Release database locks before provider calls, signing, or RPC.
+Use the [storage model's protocol](design/storage-model.md#planning-consistency-protocol) for planning, removal authorization, batch freezing, outcome application, and interest application. Planning uses the stable per-piece row and a short `READ COMMITTED` transaction, not a lease. Release database locks before provider calls, signing, or RPC.
 
 ### Interleavings that constrain the implementation
 
@@ -219,11 +219,11 @@ Transaction management coordinates sending-account nonces and retains signed byt
 
 ## Transaction submission and completion
 
-Transaction management accepts durable logical-operation requests from domain modules. It coordinates sender nonces and signing, persists signed bytes and hashes before broadcast, manages rebroadcast and fee replacement, tracks receipts, confidence and reorgs, and durably delivers outcomes. The requesting domain interprets those outcomes and decides any business response to a revert.
+Transaction management accepts durable logical-operation requests from domain modules. It coordinates sender nonces and signing, persists signed bytes and hashes before broadcast, manages rebroadcast and fee replacement, and publishes revisable outcomes. The requesting domain interprets those outcomes and decides any business response to a revert.
 
 ### Local atomic enqueue and durable completion
 
-Record the domain operation and Transaction management request together in a short transaction through their APIs, or use a durable handoff. Keep the operation key before network submission. Deliver outcomes durably and apply them idempotently; callers can query status after a missed delivery. Fee replacements are attempts of the same logical operation. Provider-relayed AddPieces retains its FWSS client nonce while the SP controls its sending account.
+Record the domain operation and Transaction management request together in a short transaction through their APIs. [Publish the outcome and wake its caller](design/execution-and-integrations.md#transaction-outcome-publication) atomically; the caller reads the current outcome and records its application. Fee replacements are attempts of the same logical operation. Provider-relayed AddPieces retains its FWSS client nonce while the SP controls its sending account.
 
 ## Wallet/keystore candidates
 
@@ -245,7 +245,7 @@ Each module owns its records and exposes interfaces; other modules do not mutate
 | Storage management | Shared interests, backend representations/placements, reconciliation, transfers, AddPieces batches, and asynchronous removals. |
 | Provider assessment | Approved/Endorsed sets, capabilities, observations, and health/eligibility assessments. |
 | Proving | Client-facing proof rounds, witness collection, assembly, and durable submission intent. |
-| Transaction management | Durable transaction requests, sender nonce coordination, signing coordination, broadcast/replacement, receipt/confidence tracking, and durable completion delivery. |
+| Transaction management | Durable transaction requests, sender nonce and signing coordination, broadcast/replacement, and revisable outcomes with caller wakes. |
 | Shared chain/signing infrastructure | Chain reads/RPC and the signing interface; not the domain decision to continue or withdraw service. |
 
 ### Payments lifecycle
@@ -261,14 +261,14 @@ When available without significant overhead, anchor a grace condition to the con
 ### Addition walkthrough
 
 1. Client service validates/correlates the signed request and its distinct ordered entries, recovers accepted replays, and runs new-admission preflight/source confirmation with Payments context.
-2. One short transaction records provisional admission, enqueues the client-facing transaction, and creates the durable Storage-management handoff.
-3. Storage management applies the stable admission identity/revision idempotently and records placement work through its interface; transfers/commitment proceed alongside client-facing work.
+2. One short transaction records admission, applies the provisional interests through Storage management's API, marks those pieces due, and enqueues the client-facing transaction.
+3. Storage management plans only the remaining protection deficit. Transfers and backend commitment proceed alongside client-facing work.
 4. Confirmation promotes the same interest; definitive failure withdraws it. Storage reconciles shared interests and unresolved operations, and exposes specific placement outcomes without Client service mutating placement records.
 5. Payments continues funding and settlement independently. When an operator-approved termination takes effect, run-off begins while issued storage work is reconciled.
 
-### Durable handoff and concurrency
+### Interest application and concurrency
 
-Client service commits admission and outgoing updates together. Storage management applies updates idempotently by admission entry and revision, recording delivery and its state atomically. Revisions prevent stale failure or removal from clearing newer or shared interests. Module interfaces and durable handoffs cross ownership boundaries; network calls occur outside database transactions.
+Storage management applies initial interest under the piece lock in the acceptance transaction. Later interest changes retain the same entry key and are applied by revision so stale failure or removal cannot clear newer or shared interests. See the [interest protocol](design/storage-model.md#interest-application-and-reconciliation).
 
 
 ## Retrieval and placement publication
@@ -278,6 +278,8 @@ Client service commits admission and outgoing updates together. Storage manageme
 Provide a PDP-compatible retrieval redirect and location-resolution API with preferred and alternative direct-download locations. Storage management owns the durable client-piece-to-representation/placement mapping that live retrieval queries.
 
 The later public catalogue publishes versioned snapshots of that mapping independently of MSP. Each advertised version must be complete enough for a consumer to reconstruct the current mapping without the MSP database or internal event history. Placement changes trigger asynchronous publication. Publish a replacement before intentionally retiring the last published usable representation. Replacement itself completes at backend AddPieces inclusion.
+
+Continuation of care when the original MSP stops operating means clients can transition to another MSP. This is a later catalogue and handoff concern, separate from Rhizome instances recovering their own durable work.
 
 ### Future packing
 

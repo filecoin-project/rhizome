@@ -12,8 +12,8 @@ Keep each contract in one canonical document and link to it from consumers. Add 
 | --- | --- |
 | [Storage model](storage-model.md) | Identities, protection accounting, invariants, locking and admission records/constraints. |
 | [Storage workflows](storage-workflows.md) | Admission through initial protection, transaction-aware module APIs and recovery boundaries. Extend through repair, removal, and retrieval. |
-| [Execution and integrations](execution-and-integrations.md) | Signed request/replay identity, transaction-hash response, upload preflight, and source confirmation. Complete external contracts and transaction/chain/signing integration. |
-| [Funding and lifecycle](funding-and-lifecycle.md) | Funding scope and admission policy. Complete settlement, grace/holds, termination, and run-off. |
+| [Execution and integrations](execution-and-integrations.md) | Durable work coordination and outcome publication; signed request replay, transaction-hash response, upload preflight, and source confirmation. Complete external contracts and transaction/chain/signing integration. |
+| [Funding and lifecycle](funding-and-lifecycle.md) | Funding scope, admission policy, and rail reconciliation. Complete settlement cadence, grace/holds, termination, and run-off. |
 | [Proving and witness assessment](proving-and-assessment.md) | Client-facing schedule, PostgreSQL DDL and worker ownership, witness collection, submission and reorg recovery. Verify deployment compatibility and timing; broader provider assessment remains open. |
 | `docs/design/operations-and-verification.md` — planned | Workload/timing budgets, capacity, outages, rolling updates, observability, and verification. |
 
@@ -34,7 +34,7 @@ Separate product commitments, protocol deadlines, configurable policy and estima
 - **Curio witnesses:** review the standalone [Curio inclusion proof proposal](../proposals/curio-inclusion-proof-proposal.md) to close the architecture's Q1 with the Curio team. Verify PieceCID-based witnesses for staged and committed data, including authorization, limits, and a first applicable proof before backend commitment.
 - **Synapse:** integrate tus Creation, offset resume, SDK result recovery and per-entry upload routing IDs; verify terms-aware creation signing and signed-request replay while preserving [transaction-hash waiting](execution-and-integrations.md#sdk-transaction-waiting).
 - **Curio upload, staging and pulls:** implement creation-only JWT grants, authenticated resource access and result recovery independent of grant expiry, PieceCID-based retention for direct-upload sources, and pull authorization and replay using MSP JWTs. Verify recovery after lost Creation responses, retention against execution/recovery budgets, cleanup races, and partial pull outcomes.
-- **Curio backend AddPieces:** establish recovery of provider-local tracking if submission escapes before membership tracking is durable.
+- **Curio backend AddPieces:** close [Curio #1670](https://github.com/filecoin-project/curio/issues/1670) and verify recovery of provider-local tracking if submission escapes before membership tracking is durable.
 - **FWSS / Filecoin Pay / chain access:** pin deployment versions, complete nonce/outcome correlation and state reads, and choose confidence for actions beyond AddPieces, including the finality criterion for backend dataset creation before batching.
 - **Signer:** select transaction/typed-data signing, custody/audit, Filecoin support and failover tooling.
 
@@ -44,7 +44,7 @@ For each integration decision, record the counterpart, affected workflow, exact 
 
 ### 3. Make the admission slice implementable
 
-The [admission records](storage-model.md#admission-persistence) and [transaction/API contracts](storage-workflows.md#local-transactions-and-module-apis) cover acceptance, FWSS nonce claims, ordered entries, inboxes, inclusion/acknowledgement and initial placements/batches. Preserve authority, preconditions, consistency scope, atomic writes, replay identity, outcome application and caller-visible result when converting them into migrations and Go APIs.
+The [admission records](storage-model.md#admission-persistence) and [transaction/API contracts](storage-workflows.md#local-transactions-and-module-apis) cover acceptance with initial interest application, FWSS nonce claims, ordered entries, caller wakes, revised outcomes, and initial placements/batches. Preserve authority, preconditions, consistency scope, atomic writes, replay identity, outcome application and caller-visible result when converting them into migrations and Go APIs.
 
 Cover either ordering of client/backend commitments, definitive failure, lost responses, duplicate delivery, cancellation and owner loss. Exercise lost tus Creation and final PATCH responses, completion after grant expiry, lost parking refresh responses and refresh/GC races, pull credential renewal, and a first proof using staged data. Verify that an unfinalized backend dataset cannot receive a batch. Follow the defined identity and locking contracts, with database-only transactions.
 
@@ -62,13 +62,13 @@ Specify ordinary repair, provider/dataset-wide replacement, bounded overlapping 
 
 Exercise the [proving deployment gates](proving-and-assessment.md#budgets-and-verification-gates) against target chain contracts and Curio. Complete provider assessment beyond witness-failure attribution.
 
-Specify payer/asset-scoped settlement and funding monitoring, adjustable grace/holds, operator-approved termination with rechecks, and initial run-off behavior. Keep settlement intent separate from actual progress, and payment shortfall separate from provider failure/deletion.
+Exercise the [rail settlement reconciler](funding-and-lifecycle.md#incoming-rail-settlement), then select settlement cadence and payer/asset-scoped funding monitoring. Specify adjustable grace/holds, operator-approved termination with rechecks, and initial run-off behavior. Keep payment shortfall separate from provider failure or deletion.
 
 **Review gate:** near-deadline owner loss, partial settlement, and funding recovery during pending termination have unambiguous outcomes.
 
 ### 6. Review operation and rollout
 
-Specify backpressure, proving/urgent-repair priority, durable-work discovery, scoped claims/fencing, bounded shutdown, dependency outages, and current-state recovery after complete MSP loss. Define mixed-version/schema transitions that preserve outstanding identities and authorized payloads.
+Specify backpressure, proving/urgent-repair priority, bounded shutdown, and recovery of durable work after instance loss or dependency outages. Exercise [leases and concurrent wakes](execution-and-integrations.md#claims-and-concurrent-wakes) under mixed versions. Preserve outstanding identities and authorized payloads across schema transitions. Client continuation of care under another MSP belongs to the [later catalogue and handoff design](../architecture.md#retrieval-and-placement-publication).
 
 **Review gate:** accepted work remains discoverable after restart, routine recovery needs no operator replay/database edits, and every core invariant has a verification scenario.
 

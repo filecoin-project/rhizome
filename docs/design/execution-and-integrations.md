@@ -1,6 +1,35 @@
 # Execution and integration contracts
 
-This document supplies admission execution contracts to the [storage model](storage-model.md) and [admission workflow](storage-workflows.md).
+This document defines shared worker coordination and external execution contracts. The [storage model](storage-model.md) and [admission workflow](storage-workflows.md) define the domain records and transactions that use them.
+
+## Durable work coordination
+
+Reconcile by a stable domain key. A wake means that the worker should read current facts, not replay the event that woke it. Use the same decision path for scheduled work, changed evidence, retries, and takeover.
+
+| Work | Transaction boundary |
+| --- | --- |
+| Local domain change | Call the owning module's transaction-aware API directly when the changes belong in one commit. When a due marker is on the domain row and the decision fits under its lock, read current facts, commit the decision and follow-on work, and clear or reschedule the marker in one short transaction. No lease. |
+| Reconciliation across I/O | Claim only when a worker slot is available. Read external evidence outside SQL, then recheck ownership and the applicable domain inputs before committing. Repeat cheap reads on takeover; checkpoint results needed for correctness or deadlines. Persist a next wake instead of holding a worker or lease while waiting for a receipt, retry time, or epoch. |
+| External mutation | Record a stable intent and its exact parameters before issue. The executor advances that intent, records attributed outcomes, and makes the domain due. If an effect may have escaped, recover the outcome or replay the same operation where the integration supports it. A missing response is not permission to create a replacement. |
+
+Use an indexed due marker on the owning row when that row already identifies the work and its writers share the same lock. Use a separate coalescing inbox keyed by work kind and domain key when a producer should wake a consumer without taking its domain locks. Register inbox rows that reference domain records when those records are created; later wakes update the inbox without taking a domain lock. A wake contains no business payload. Commit a changed fact and the wake it requires together. Keep individual, non-superseding effects discoverable by stable identity; when a consumer needs its own durable copy, hand off the exact effect evidence rather than treating the wake as evidence.
+
+### Claims and concurrent wakes
+
+For leased work, keep `due_at`, `lease_until`, and `generation` with the scheduling key. An indexed claim time is `coalesce(lease_until, due_at)`: an expired lease is claimable even if no wake is pending. Use bounded `FOR UPDATE SKIP LOCKED` scans in short transactions and claim only formats the worker supports. This is not a fairness or deadline guarantee.
+
+- **Wake:** set `due_at` to the earlier of the pending and requested times, without changing the lease.
+- **Claim:** consume `due_at` if it is already due, preserving any future wake; increment `generation` and start a bounded lease.
+- **Fence or renew:** lock the work row before comparing the generation and live expiry against `clock_timestamp()`. Roll back guarded writes on mismatch or expiry. Renew independently of blocked I/O when necessary.
+- **Finish:** under the same fence, release the lease and retain the earlier of the pending wake and the next time requested by the worker. A wake received during a claim survives; a crash before finish recovers by lease expiry. No separate wake revision is needed.
+
+For a separate inbox, claims and renewals touch only the work row. In a transaction that also changes domain state, take domain locks first and separate scheduling locks last, in stable key order if there is more than one. Commit the fence with the guarded writes. Retain the work row while an old claim might still refer to it; never reuse its generation for the same key. A lease fences local writes, not an issued external request or the freshness of the facts used to authorize it. Shutdown stops new claims and lets committed work recover normally.
+
+### Transaction outcome publication
+
+Enqueue a logical transaction with its domain intent and the caller's reconciliation key in the same local transaction. Transaction management owns the exact signed attempts, sender reservations, receipts and current outcome. Publish a changed outcome revision and wake the caller atomically. Also wake it when revalidation makes a previously unavailable outcome applicable again, even if the outcome revision is unchanged. The caller reads through the owner API and records what it applied with its domain changes; there is no acknowledgement back to Transaction management.
+
+One caller wake may cover several requests, but replace only complete snapshots of the same logical request. Preserve exact receipt evidence needed by replay or downstream effects. A consumer that cannot finish applying the current outcome leaves its own key due. Unresolved requests retain timed retries; a known branch change makes stale outcomes discoverable for revalidation, including previously resolved requests. A wake does not replace a chain-applicability check.
 
 ## Source-backed authorization boundary
 
@@ -53,9 +82,9 @@ A fresh nonce creates a distinct addition even for the same PieceCID and dataset
 
 Curio rejects duplicate subpieces in one HTTP addition. MSP submits the client-facing call through Transaction management and applies Curio's rule to backend batches. Reuse compatible placements, and put any required distinct placements of the same piece at one SP in separate compatible batches. Keep the signed client request, entry outcomes, memberships, and payment semantics intact.
 
-### Revision delivery
+### Interest revisions
 
-Each entry's source revision orders Client service updates for that entry only. Applying an interest update, recording its revision/delivery identity, and leaving required reconciliation discoverable is atomic at Storage management's boundary.
+Acceptance applies the initial interest in the same transaction. Each entry's source revision orders later updates for that entry only. Applying a later snapshot, recording its revision, and making the piece due is atomic at Storage management's boundary.
 
 Use the same key for provisional acceptance, confirmation, definitive failure, and later removal. A failure or removal applies only to its own entry identity. Use the model's piece coordination rows to serialize competing placement decisions.
 
@@ -132,7 +161,7 @@ A zero outcome establishes only that the nonce has no successful consumption in 
 
 ## Combined dataset creation and addition
 
-The SDK's first commit can create a dataset and add its first pieces through `POST /pdp/data-sets/create-and-add`. Persist both signed authorizations, the complete ordered body, both FWSS nonce claims, the transaction request, and the entry handoffs atomically. Creation claims the `clientDataSetId`; addition claims the nonce. Both use the same payer/FWSS namespace and must be distinct.
+The SDK's first commit can create a dataset and add its first pieces through `POST /pdp/data-sets/create-and-add`. Persist both signed authorizations, the complete ordered body, both FWSS nonce claims, the transaction request, and the applied provisional interests atomically. Creation claims the `clientDataSetId`; addition claims the nonce. Both use the same payer/FWSS namespace and must be distinct.
 
 Until the transaction succeeds, identify each entry by the accepted request and its index. On success, attach the on-chain dataset and piece IDs to those entries. The verifier creates the dataset and appends pieces in a single transaction; a revert rolls back both actions.
 
